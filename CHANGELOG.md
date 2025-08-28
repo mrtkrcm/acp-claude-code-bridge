@@ -1,3 +1,9 @@
+## [0.5.2](https://github.com/xuanwo/acp-claude-code/compare/v0.5.1...v0.5.2) (2025-08-28)
+
+### Bug Fixes
+
+* Handle tool_use in assistant messages and tool_result in user messages ([#45](https://github.com/xuanwo/acp-claude-code/issues/45)) ([d585e19](https://github.com/xuanwo/acp-claude-code/commit/d585e19516a13e406c4316d3ce4b7ac7d55e133f)), closes [#43](https://github.com/xuanwo/acp-claude-code/issues/43)
+
 ## [0.5.1](https://github.com/xuanwo/acp-claude-code/compare/v0.5.0...v0.5.1) (2025-08-28)
 
 ### Bug Fixes
