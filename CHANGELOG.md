@@ -1,3 +1,9 @@
+## [0.5.1](https://github.com/xuanwo/acp-claude-code/compare/v0.5.0...v0.5.1) (2025-08-28)
+
+### Bug Fixes
+
+* Update package.json entry points to use cli.js ([#32](https://github.com/xuanwo/acp-claude-code/issues/32)) ([6cfb2ba](https://github.com/xuanwo/acp-claude-code/commit/6cfb2ba84fead04a37d9fe0d7e7f062429adad08))
+
 ## [0.5.0](https://github.com/xuanwo/acp-claude-code/compare/v0.4.0...v0.5.0) (2025-08-28)
 
 ### Features
