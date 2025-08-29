@@ -1,3 +1,9 @@
+## [0.5.3](https://github.com/xuanwo/acp-claude-code/compare/v0.5.2...v0.5.3) (2025-08-29)
+
+### Bug Fixes
+
+* **agent:** update loadSession return type to Promise<void> for compatibility ([#46](https://github.com/xuanwo/acp-claude-code/issues/46)) ([2486229](https://github.com/xuanwo/acp-claude-code/commit/248622985953ec3813c65ea628dc375ff3e28190))
+
 ## [0.5.2](https://github.com/xuanwo/acp-claude-code/compare/v0.5.1...v0.5.2) (2025-08-28)
 
 ### Bug Fixes
