@@ -1,0 +1,12 @@
+{
+  "agent_servers": {
+    "claude-code": {
+      "command": "acp-claude-code",
+      "env": {
+        "ACP_DEBUG": "true",
+        "ACP_LOG_FILE": "/Users/m/code/acp-claude-code/logs/acp-bridge.log",
+        "CLAUDE_CODE_OAUTH_TOKEN": "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"
+      }
+    }
+  }
+}

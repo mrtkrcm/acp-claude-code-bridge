@@ -34,6 +34,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "format": "prettier --experimental-cli --write .",
+    "diagnose": "node dist/index.js --diagnose",
+    "test": "pnpm run typecheck && pnpm run lint",
     "prepublishOnly": "pnpm run build",
     "prepare": "pnpm run build"
   },

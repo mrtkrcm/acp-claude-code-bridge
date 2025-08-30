@@ -1,8 +1,16 @@
-# ACP Claude Code Bridge
+# ACP-Claude-Code Bridge
 
-A bridge implementation that enables Claude Code to work with the Agent Client Protocol (ACP), allowing it to integrate with Zed editor and other ACP-compatible clients.
+A robust Agent Client Protocol (ACP) bridge that enables Claude Code to work seamlessly with Zed editor and other ACP-compatible clients.
 
-**NOTE: Zed team is working on [native support](https://github.com/zed-industries/zed/blob/main/crates/agent_servers/src/claude.rs) now**
+## 🚀 Features
+
+- **Full ACP Protocol Support**: Complete implementation of the Agent Client Protocol
+- **Configurable Turn Limits**: Set custom turn limits or enable unlimited sessions (0 = unlimited)
+- **Context Monitoring**: Smart 200k context window management with graceful warnings
+- **Session Persistence**: Resume conversations across restarts
+- **Comprehensive Logging**: Debug-friendly logging with file output support
+- **Robust Error Handling**: Graceful degradation and clear error messages
+- **Multiple Permission Modes**: Support for different interaction patterns
 
 ## Architecture
 
@@ -221,11 +229,23 @@ Please update all the TypeScript files to use the new API
 
 ## Environment Variables
 
-The bridge supports the following environment variables:
+### Core Settings
 
-- **`ACP_DEBUG`** - Enable debug logging (`true`/`false`)
-- **`ACP_PERMISSION_MODE`** - Set permission mode (`default`/`acceptEdits`/`bypassPermissions`)
-- **`ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE`** - Path to a custom Claude Code executable
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `ACP_MAX_TURNS` | Maximum turns per session (0 = unlimited) | `100` | `1000` |
+| `ACP_PERMISSION_MODE` | Default permission mode | `default` | `acceptEdits` |
+| `ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE` | Path to Claude Code executable | auto-detect | `/usr/local/bin/claude` |
+
+### Debugging & Logging
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `ACP_DEBUG` | Enable debug logging | `false` | `true` |
+| `ACP_LOG_FILE` | File path for persistent logs | none | `/tmp/acp-bridge.log` |
+
+**NEW: Unlimited Sessions**
+Set `ACP_MAX_TURNS=0` for unlimited turns - no session interruption!
 
 ## Debugging
 

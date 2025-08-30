@@ -15,37 +15,104 @@ import {
   LoadSessionRequest,
 } from "@zed-industries/agent-client-protocol";
 import type { ClaudeMessage, ClaudeStreamEvent } from "./types.js";
+import { ContextMonitor } from "./context-monitor.js";
+import { createWriteStream } from "node:fs";
+import { resolve } from "node:path";
 
 interface AgentSession {
   pendingPrompt: AsyncIterableIterator<SDKMessage> | null;
   abortController: AbortController | null;
   claudeSessionId?: string; // Claude's actual session_id, obtained after first message
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan"; // Permission mode for this session
+  [key: string]: unknown; // Allow dynamic properties for warnings
 }
 
 export class ClaudeACPAgent implements Agent {
   private sessions: Map<string, AgentSession> = new Map();
+  private contextMonitor: ContextMonitor;
   private DEBUG = process.env.ACP_DEBUG === "true";
-  private defaultPermissionMode:
-    | "default"
-    | "acceptEdits"
-    | "bypassPermissions"
-    | "plan" =
-    (process.env.ACP_PERMISSION_MODE as
-      | "default"
-      | "acceptEdits"
-      | "bypassPermissions"
-      | "plan") || "default";
-  private pathToClaudeCodeExecutable: string | undefined =
-    process.env.ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE;
+  private fileLogger: NodeJS.WritableStream | null = null;
+  private maxTurns: number;
+  private defaultPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
+  private pathToClaudeCodeExecutable: string | undefined;
+
+  private static validateConfig() {
+    const maxTurns = process.env.ACP_MAX_TURNS;
+    if (maxTurns && !/^\d+$/.test(maxTurns)) {
+      throw new Error(`Invalid ACP_MAX_TURNS: "${maxTurns}" must be a positive integer`);
+    }
+
+    const permissionMode = process.env.ACP_PERMISSION_MODE;
+    if (permissionMode && !["default", "acceptEdits", "bypassPermissions", "plan"].includes(permissionMode)) {
+      throw new Error(`Invalid ACP_PERMISSION_MODE: "${permissionMode}". Must be one of: default, acceptEdits, bypassPermissions, plan`);
+    }
+  }
 
   constructor(private client: Client) {
-    this.log("Initialized with client");
+    // Validate configuration before initialization
+    ClaudeACPAgent.validateConfig();
+
+    // Initialize configuration with validation
+    this.maxTurns = this.parseMaxTurns();
+    this.defaultPermissionMode = this.parsePermissionMode();
+    this.pathToClaudeCodeExecutable = process.env.ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE;
+    
+    this.contextMonitor = new ContextMonitor(this.DEBUG);
+    this.initializeLogging();
+    
+    this.log(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`);
+    
+    // Cleanup old sessions periodically (every hour)
+    setInterval(() => {
+      this.contextMonitor.cleanupOldSessions();
+    }, 60 * 60 * 1000);
+  }
+
+  private parseMaxTurns(): number {
+    const value = process.env.ACP_MAX_TURNS;
+    if (!value) return 100; // Default
+    
+    const parsed = parseInt(value, 10);
+    if (isNaN(parsed) || parsed < 0) {
+      throw new Error(`Invalid ACP_MAX_TURNS: "${value}" must be a non-negative integer`);
+    }
+    
+    return parsed;
+  }
+
+  private parsePermissionMode(): "default" | "acceptEdits" | "bypassPermissions" | "plan" {
+    const mode = process.env.ACP_PERMISSION_MODE as "default" | "acceptEdits" | "bypassPermissions" | "plan";
+    return mode || "default";
+  }
+
+  private initializeLogging(): void {
+    const LOG_FILE = process.env.ACP_LOG_FILE;
+    if (!LOG_FILE) return;
+
+    try {
+      const logPath = resolve(LOG_FILE);
+      this.fileLogger = createWriteStream(logPath, { flags: 'a' });
+      this.fileLogger.on('error', (error) => {
+        console.error(`[ClaudeACPAgent] Log file error: ${error.message}`);
+        this.fileLogger = null; // Disable file logging on error
+      });
+    } catch (error) {
+      console.error(`[ClaudeACPAgent] Failed to create log file ${LOG_FILE}: ${error}`);
+    }
   }
 
   private log(message: string, ...args: unknown[]) {
+    const timestamp = new Date().toISOString();
+    const fullMessage = `[${timestamp}] [DEBUG] [ClaudeACPAgent] ${message}`;
+    const argsStr = args.length > 0 ? ` ${args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ')}` : '';
+    
     if (this.DEBUG) {
-      console.error(`[ClaudeACPAgent] ${message}`, ...args);
+      console.error(fullMessage + argsStr);
+    }
+    
+    // Log to file if configured
+    if (this.fileLogger) {
+      this.fileLogger.write(fullMessage + argsStr + '\n');
     }
   }
 
@@ -156,6 +223,26 @@ export class ClaudeACPAgent implements Agent {
       this.log(
         `Prompt received (${promptText.length} chars): ${promptText.substring(0, 100)}...`,
       );
+      
+      // Track context usage for user message
+      const contextWarning = this.contextMonitor.trackMessage(currentSessionId, promptText, 'user');
+      if (contextWarning) {
+        this.log(`Context warning: ${contextWarning.message}`);
+        
+        // Send context status as a subtle message to user
+        if (contextWarning.level === 'critical') {
+          await this.client.sessionUpdate({
+            sessionId: currentSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: {
+                type: "text",
+                text: `⚠️ ${contextWarning.message}\n${contextWarning.recommendation || ''}\n\n`,
+              },
+            },
+          });
+        }
+      }
 
       // Use simple string prompt - Claude SDK will handle history with resume
       const queryInput = promptText;
@@ -183,22 +270,30 @@ export class ClaudeACPAgent implements Agent {
 
       this.log(`Using permission mode: ${permissionMode}`);
 
-      // Start Claude query
+      // Start Claude query with configurable turn limit (0 = unlimited)
+      const queryOptions: Record<string, unknown> = {
+        permissionMode,
+        pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable,
+        resume: session.claudeSessionId || undefined,
+      };
+      
+      // Only set maxTurns if not unlimited (0)
+      if (this.maxTurns > 0) {
+        queryOptions.maxTurns = this.maxTurns;
+      }
+      
+      this.log(`Starting query with${this.maxTurns === 0 ? ' unlimited' : ` ${this.maxTurns}`} turns`);
+      
       const messages = query({
         prompt: queryInput,
-        options: {
-          maxTurns: 10,
-          permissionMode,
-          pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable,
-          // Resume if we have a Claude session_id
-          resume: session.claudeSessionId || undefined,
-        },
+        options: queryOptions,
       });
 
       session.pendingPrompt = messages as AsyncIterableIterator<SDKMessage>;
 
       // Process messages and send updates
       let messageCount = 0;
+      let turnCount = 0;
 
       for await (const message of messages) {
         if (session.abortController?.signal.aborted) {
@@ -206,12 +301,46 @@ export class ClaudeACPAgent implements Agent {
         }
 
         messageCount++;
+        const sdkMessage = message as SDKMessage;
+        
+        // Count turns (assistant messages that aren't system)
+        if (sdkMessage.type === 'assistant') {
+          turnCount++;
+          
+          // Warn when approaching turn limit (only if limit is set)
+          if (this.maxTurns > 0) {
+            const warningThreshold = Math.max(10, this.maxTurns * 0.8);
+            if (turnCount >= warningThreshold && turnCount < this.maxTurns) {
+              this.log(`Turn warning: ${turnCount}/${this.maxTurns} turns used`);
+              
+              // Send warning to user (only once per session)
+              const warningKey: string = `turn_warning_${session.claudeSessionId}`;
+              if (!(warningKey in session)) {
+                session[warningKey] = true;
+                
+                await this.client.sessionUpdate({
+                  sessionId: currentSessionId,
+                  update: {
+                    sessionUpdate: "agent_message_chunk",
+                    content: {
+                      type: "text",
+                      text: `\n📊 Turn usage: ${turnCount}/${this.maxTurns} turns used. Continuing analysis...\n\n`,
+                    },
+                  },
+                });
+              }
+            }
+          } else if (turnCount % 50 === 0 && turnCount > 0) {
+            // Log progress for unlimited sessions every 50 turns
+            this.log(`Unlimited session progress: ${turnCount} turns completed`);
+          }
+        }
+        
         this.log(
-          `Processing message #${messageCount} of type: ${(message as SDKMessage).type}`,
+          `Processing message #${messageCount} (turn ${turnCount}) of type: ${sdkMessage.type}`,
         );
 
         // Extract and store Claude's session_id from any message that has it
-        const sdkMessage = message as SDKMessage;
         if (
           "session_id" in sdkMessage &&
           typeof sdkMessage.session_id === "string" &&
@@ -356,6 +485,11 @@ export class ClaudeACPAgent implements Agent {
         if (msg.message && msg.message.content) {
           for (const content of msg.message.content) {
             if (content.type === "text") {
+              const text = content.text || "";
+              
+              // Track context usage for assistant message
+              this.contextMonitor.trackMessage(sessionId, text, 'assistant');
+              
               // Send text content without adding extra newlines
               // Claude already formats the text properly
               await this.client.sessionUpdate({
@@ -364,7 +498,7 @@ export class ClaudeACPAgent implements Agent {
                   sessionUpdate: "agent_message_chunk",
                   content: {
                     type: "text",
-                    text: content.text || "",
+                    text: text,
                   },
                 },
               });
