@@ -1,3 +1,9 @@
+## [0.5.4](https://github.com/xuanwo/acp-claude-code/compare/v0.5.3...v0.5.4) (2025-08-30)
+
+### Bug Fixes
+
+* add support for pathToClaudeCodeExecutable ([#48](https://github.com/xuanwo/acp-claude-code/issues/48)) ([aa68737](https://github.com/xuanwo/acp-claude-code/commit/aa68737d3b65bbabcb8af8807d4302707cd09ccc))
+
 ## [0.5.3](https://github.com/xuanwo/acp-claude-code/compare/v0.5.2...v0.5.3) (2025-08-29)
 
 ### Bug Fixes
