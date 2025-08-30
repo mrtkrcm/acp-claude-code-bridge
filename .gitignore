@@ -28,3 +28,8 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+
+# Documentation and planning
+docs/
+TODO.md
+NEXT_STEPS.md
