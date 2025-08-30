@@ -118,6 +118,7 @@ export class ClaudeACPAgent implements Agent {
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.log(`Initialize with protocol version: ${params.protocolVersion}`);
+    this.log(`Client capabilities: ${JSON.stringify(params.clientCapabilities || {})}`);
 
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -615,20 +616,28 @@ export class ClaudeACPAgent implements Agent {
           }
         }
 
-        // Enhanced tool call with descriptive title
+        // Enhanced tool call with descriptive title and location
         const toolTitle = this.getEnhancedToolTitle(msg.tool_name || "Tool", input);
+        const toolLocation = this.getToolLocation(msg.tool_name || "Tool", input);
+        
+        const toolCallUpdate: any = {
+          sessionUpdate: "tool_call",
+          toolCallId: msg.id || "",
+          title: toolTitle,
+          kind: this.mapToolKind(msg.tool_name || ""),
+          status: "pending",
+          rawInput: input as Record<string, unknown>,
+        };
+        
+        // Add location if available for file operations
+        if (toolLocation) {
+          toolCallUpdate.location = toolLocation;
+          this.log(`Tool location: ${toolLocation.path}${toolLocation.line ? `:${toolLocation.line}` : ''}`);
+        }
         
         await this.client.sessionUpdate({
           sessionId,
-          update: {
-            sessionUpdate: "tool_call",
-            toolCallId: msg.id || "",
-            title: toolTitle,
-            kind: this.mapToolKind(msg.tool_name || ""),
-            status: "pending",
-            // Pass the input directly without extra processing
-            rawInput: input as Record<string, unknown>,
-          },
+          update: toolCallUpdate,
         });
 
         // For TodoWrite tool, also send formatted todo list as text
@@ -803,6 +812,32 @@ export class ClaudeACPAgent implements Agent {
     
     // Default to tool name
     return toolName;
+  }
+
+  private getToolLocation(toolName: string, input?: unknown): { path: string; line?: number } | undefined {
+    if (!input || typeof input !== 'object' || input === null) {
+      return undefined;
+    }
+    
+    const inputObj = input as Record<string, unknown>;
+    
+    // File operations - extract path and line info
+    if (inputObj.file_path && typeof inputObj.file_path === 'string') {
+      const location: { path: string; line?: number } = {
+        path: inputObj.file_path
+      };
+      
+      // Check for line numbers in various tool inputs
+      if (typeof inputObj.line === 'number') {
+        location.line = inputObj.line;
+      } else if (typeof inputObj.offset === 'number') {
+        location.line = inputObj.offset;
+      }
+      
+      return location;
+    }
+    
+    return undefined;
   }
 
   private mapToolKind(
