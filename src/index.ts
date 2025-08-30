@@ -81,7 +81,7 @@ export async function main() {
 
     // We're implementing an Agent, so we use AgentSideConnection
     // First parameter is output (to client), second is input (from client)
-    const _connection = new AgentSideConnection(
+    new AgentSideConnection(
       (client) => {
         log("Creating ClaudeACPAgent with client", 'DEBUG');
         return new ClaudeACPAgent(client);

@@ -13,6 +13,11 @@ import {
   PromptResponse,
   CancelNotification,
   LoadSessionRequest,
+  ClientCapabilities,
+  ReadTextFileRequest,
+  WriteTextFileRequest,
+  RequestPermissionRequest,
+  PermissionOption,
 } from "@zed-industries/agent-client-protocol";
 import type { ClaudeMessage, ClaudeStreamEvent } from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
@@ -35,6 +40,7 @@ export class ClaudeACPAgent implements Agent {
   private maxTurns: number;
   private defaultPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   private pathToClaudeCodeExecutable: string | undefined;
+  private clientCapabilities: ClientCapabilities = {};
 
   private static validateConfig() {
     const maxTurns = process.env.ACP_MAX_TURNS;
@@ -119,6 +125,11 @@ export class ClaudeACPAgent implements Agent {
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.log(`Initialize with protocol version: ${params.protocolVersion}`);
     this.log(`Client capabilities: ${JSON.stringify(params.clientCapabilities || {})}`);
+
+    // Store client capabilities for direct operations
+    this.clientCapabilities = params.clientCapabilities || {};
+    this.log(`File system capabilities: readTextFile=${this.clientCapabilities.fs?.readTextFile}, writeTextFile=${this.clientCapabilities.fs?.writeTextFile}`);
+    this.log(`Permission system: ACP supports native permission dialogs=${!!this.client.requestPermission}`);
 
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -616,29 +627,108 @@ export class ClaudeACPAgent implements Agent {
           }
         }
 
+        // Try to handle direct file operations through ACP
+        const directOperationResult = await this.tryDirectFileOperation(
+          sessionId,
+          msg.tool_name || "",
+          msg.id || "",
+          input
+        );
+        
+        // If direct operation was handled, don't proceed with normal tool call flow
+        if (directOperationResult) {
+          break;
+        }
+
+        // Check if we should request permission for this tool operation
+        const shouldRequestPermission = await this.shouldRequestPermissionForTool(
+          sessionId,
+          msg.tool_name || "",
+          input
+        );
+
+        if (shouldRequestPermission) {
+          // Create tool call for permission request (not ToolCallUpdate)
+          const toolTitle = this.getEnhancedToolTitle(msg.tool_name || "Tool", input);
+          const toolCall = {
+            title: toolTitle,
+            kind: this.mapToolKind(msg.tool_name || ""),
+            status: "pending" as const,
+            toolCallId: msg.id || "",
+            content: [
+              {
+                type: "content" as const,
+                content: {
+                  type: "text" as const,
+                  text: this.getToolDescription(msg.tool_name || "", input),
+                },
+              },
+            ],
+          };
+
+          const permission = await this.requestUserPermission(
+            sessionId,
+            `execute ${msg.tool_name}`,
+            toolCall,
+            this.getToolDescription(msg.tool_name || "", input)
+          );
+
+          if (permission !== 'allowed') {
+            // Send permission denied notification and skip tool execution
+            await this.client.sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: "tool_call" as const,
+                toolCallId: msg.id || "",
+                title: toolTitle,
+                kind: this.mapToolKind(msg.tool_name || ""),
+                status: "pending" as const,
+                rawInput: input as Record<string, unknown>,
+              },
+            });
+
+            await this.client.sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: "tool_call_update" as const,
+                toolCallId: msg.id || "",
+                status: "failed" as const,
+                content: [
+                  {
+                    type: "content" as const,
+                    content: {
+                      type: "text",
+                      text: `Permission ${permission} for ${msg.tool_name} operation`,
+                    },
+                  },
+                ],
+                rawOutput: { permission, operation: msg.tool_name },
+              },
+            });
+            break; // Don't proceed with tool execution
+          }
+        }
+
         // Enhanced tool call with descriptive title and location
         const toolTitle = this.getEnhancedToolTitle(msg.tool_name || "Tool", input);
         const toolLocation = this.getToolLocation(msg.tool_name || "Tool", input);
         
-        const toolCallUpdate: any = {
-          sessionUpdate: "tool_call",
-          toolCallId: msg.id || "",
-          title: toolTitle,
-          kind: this.mapToolKind(msg.tool_name || ""),
-          status: "pending",
-          rawInput: input as Record<string, unknown>,
-        };
-        
-        // Add location if available for file operations
-        if (toolLocation) {
-          toolCallUpdate.location = toolLocation;
-          this.log(`Tool location: ${toolLocation.path}${toolLocation.line ? `:${toolLocation.line}` : ''}`);
-        }
-        
         await this.client.sessionUpdate({
           sessionId,
-          update: toolCallUpdate,
+          update: {
+            sessionUpdate: "tool_call" as const,
+            toolCallId: msg.id || "",
+            title: toolTitle,
+            kind: this.mapToolKind(msg.tool_name || ""),
+            status: "pending" as const,
+            rawInput: input as Record<string, unknown>,
+          },
         });
+        
+        // Log location if available
+        if (toolLocation) {
+          this.log(`Tool location: ${toolLocation.path}${toolLocation.line ? `:${toolLocation.line}` : ''}`);
+        }
 
         // For TodoWrite tool, also send formatted todo list as text
         if (
@@ -777,6 +867,466 @@ export class ClaudeACPAgent implements Agent {
           JSON.stringify(message).substring(0, 500),
         );
     }
+  }
+
+  /**
+   * Requests user permission through ACP's official permission system.
+   * Provides better UX than Claude's built-in permission prompts.
+   */
+  private async requestUserPermission(
+    sessionId: string,
+    operation: string,
+    toolCall: {
+      title: string;
+      kind: "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "other";
+      status: "pending" | "in_progress" | "completed" | "failed";
+      toolCallId: string;
+      content: Array<{
+        type: 'content';
+        content: {
+          type: 'text';
+          text: string;
+        };
+      }>;
+    },
+    _description?: string
+  ): Promise<'allowed' | 'denied' | 'cancelled'> {
+    // Check permission mode - bypass if configured
+    const session = this.sessions.get(sessionId);
+    const permissionMode = session?.permissionMode || this.defaultPermissionMode;
+
+    if (permissionMode === 'bypassPermissions') {
+      this.log(`Bypassing permission request for ${operation} (mode: ${permissionMode})`);
+      return 'allowed';
+    }
+
+    if (permissionMode === 'acceptEdits') {
+      this.log(`Auto-accepting permission for ${operation} (mode: ${permissionMode})`);
+      return 'allowed';
+    }
+
+    // Use ACP native permission dialog if available
+    if (this.client.requestPermission) {
+      this.log(`Requesting ACP permission for: ${operation}`);
+      
+      try {
+        const options: PermissionOption[] = [
+          {
+            optionId: 'allow',
+            name: 'Allow',
+            kind: 'allow_once' as const,
+          },
+          {
+            optionId: 'deny',
+            name: 'Deny',
+            kind: 'reject_once' as const,
+          },
+          {
+            optionId: 'always',
+            name: 'Always Allow',
+            kind: 'allow_always' as const,
+          },
+        ];
+
+        const permissionRequest: RequestPermissionRequest = {
+          sessionId,
+          toolCall,
+          options,
+        };
+
+        const response = await this.client.requestPermission(permissionRequest);
+        
+        if (response.outcome.outcome === 'cancelled') {
+          this.log(`Permission request cancelled for: ${operation}`);
+          return 'cancelled';
+        } else if (response.outcome.outcome === 'selected') {
+          const selectedOption = response.outcome.optionId;
+          this.log(`Permission ${selectedOption} for: ${operation}`);
+          
+          // Handle "always allow" by updating session permission mode
+          if (selectedOption === 'always' && session) {
+            session.permissionMode = 'acceptEdits';
+            this.log(`Updated session permission mode to acceptEdits for future operations`);
+          }
+          
+          return selectedOption === 'allow' || selectedOption === 'always' ? 'allowed' : 'denied';
+        }
+      } catch (error) {
+        this.log(`ACP permission request failed: ${error}`, 'ERROR');
+        // Fall through to default behavior
+      }
+    }
+
+    // Fallback: Check permission mode for default behavior
+    if (permissionMode === 'plan') {
+      this.log(`Plan mode - denying ${operation} for review`);
+      return 'denied';
+    }
+
+    // Default mode - allow (matches Claude's default behavior)
+    this.log(`Default permission granted for: ${operation}`);
+    return 'allowed';
+  }
+
+  /**
+   * Attempts to handle file operations directly through ACP instead of Claude tools.
+   * Returns true if the operation was handled directly, false if fallback to Claude tools is needed.
+   */
+  private async tryDirectFileOperation(
+    sessionId: string,
+    toolName: string,
+    toolCallId: string,
+    input: unknown
+  ): Promise<boolean> {
+    if (!input || typeof input !== 'object' || input === null) {
+      return false;
+    }
+
+    const inputObj = input as Record<string, unknown>;
+    const lowerToolName = toolName.toLowerCase();
+
+    try {
+      // Handle Read operations with ACP readTextFile
+      if (lowerToolName === 'read' && this.clientCapabilities.fs?.readTextFile && inputObj.file_path) {
+        // Validate file path
+        const filePath = String(inputObj.file_path).trim();
+        if (!filePath || filePath.length === 0) {
+          this.log(`Invalid file path for ACP readTextFile: "${filePath}"`);
+          return false;
+        }
+
+        this.log(`Using ACP direct readTextFile for: ${filePath}`);
+
+        // Create tool call for permission request
+        const toolCall = {
+          title: `Read: ${filePath.split('/').pop()}`,
+          kind: "read" as const,
+          status: "pending" as const,
+          toolCallId,
+          content: [
+            {
+              type: "content" as const,
+              content: {
+                type: "text" as const,
+                text: `Read contents of ${filePath}`,
+              },
+            },
+          ],
+        };
+
+        // Send tool call start notification
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call" as const,
+            toolCallId,
+            title: `Read: ${filePath.split('/').pop()}`,
+            kind: "read" as const,
+            status: "pending" as const,
+            rawInput: inputObj,
+          },
+        });
+
+        // Request permission for file read
+        const permission = await this.requestUserPermission(
+          sessionId,
+          `read file ${filePath}`,
+          toolCall,
+          `Read contents of ${filePath}`
+        );
+
+        if (permission !== 'allowed') {
+          // Send cancellation/denial notification
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update" as const,
+              toolCallId,
+              status: "failed" as const,
+              content: [
+                {
+                  type: "content" as const,
+                  content: {
+                    type: "text",
+                    text: `Permission ${permission} for reading ${filePath}`,
+                  },
+                },
+              ],
+              rawOutput: { permission, operation: 'read' },
+            },
+          });
+          return true; // Handled, don't fall back
+        }
+
+        // Validate and prepare read parameters
+        const readParams: ReadTextFileRequest = {
+          sessionId,
+          path: filePath,
+        };
+
+        // Add optional parameters with validation
+        if (typeof inputObj.offset === 'number' && inputObj.offset >= 1) {
+          readParams.line = inputObj.offset;
+        }
+        if (typeof inputObj.limit === 'number' && inputObj.limit > 0) {
+          readParams.limit = inputObj.limit;
+        }
+
+        const response = await this.client.readTextFile(readParams);
+
+        // Validate response
+        if (!response || typeof response.content !== 'string') {
+          throw new Error('Invalid response from ACP readTextFile');
+        }
+
+        // Send successful completion
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "completed",
+            content: [
+              {
+                type: "content",
+                content: {
+                  type: "text",
+                  text: response.content,
+                },
+              },
+            ],
+            rawOutput: { content: response.content, length: response.content.length },
+          },
+        });
+
+        this.log(`ACP readTextFile completed: ${response.content.length} characters from ${filePath}`);
+        return true;
+      }
+
+      // Handle Write operations with ACP writeTextFile  
+      if (lowerToolName === 'write' && this.clientCapabilities.fs?.writeTextFile && inputObj.file_path && inputObj.content) {
+        // Validate file path and content
+        const filePath = String(inputObj.file_path).trim();
+        const content = String(inputObj.content);
+        
+        if (!filePath || filePath.length === 0) {
+          this.log(`Invalid file path for ACP writeTextFile: "${filePath}"`);
+          return false;
+        }
+
+        this.log(`Using ACP direct writeTextFile for: ${filePath} (${content.length} chars)`);
+
+        // Create tool call for permission request
+        const toolCall = {
+          title: `Write: ${filePath.split('/').pop()}`,
+          kind: "edit" as const,
+          status: "pending" as const,
+          toolCallId,
+          content: [
+            {
+              type: "content" as const,
+              content: {
+                type: "text" as const,
+                text: `Write ${content.length} characters to ${filePath}`,
+              },
+            },
+          ],
+        };
+
+        // Send tool call start notification
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call" as const,
+            toolCallId,
+            title: `Write: ${filePath.split('/').pop()}`,
+            kind: "edit" as const,
+            status: "pending" as const,
+            rawInput: inputObj,
+          },
+        });
+
+        // Request permission for file write (more sensitive operation)
+        const permission = await this.requestUserPermission(
+          sessionId,
+          `write ${content.length} characters to ${filePath}`,
+          toolCall,
+          `Write ${content.length} characters to ${filePath}`
+        );
+
+        if (permission !== 'allowed') {
+          // Send cancellation/denial notification
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update" as const,
+              toolCallId,
+              status: "failed" as const,
+              content: [
+                {
+                  type: "content" as const,
+                  content: {
+                    type: "text",
+                    text: `Permission ${permission} for writing to ${filePath}`,
+                  },
+                },
+              ],
+              rawOutput: { permission, operation: 'write' },
+            },
+          });
+          return true; // Handled, don't fall back
+        }
+
+        const writeParams: WriteTextFileRequest = {
+          sessionId,
+          path: filePath,
+          content: content,
+        };
+
+        await this.client.writeTextFile(writeParams);
+
+        // Send successful completion
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "completed",
+            content: [
+              {
+                type: "content",
+                content: {
+                  type: "text",
+                  text: `Successfully wrote ${content.length} characters to ${filePath}`,
+                },
+              },
+            ],
+            rawOutput: { success: true, path: filePath, length: content.length },
+          },
+        });
+
+        this.log(`ACP writeTextFile completed: ${content.length} characters to ${filePath}`);
+        return true;
+      }
+
+    } catch (error) {
+      this.log(`ACP direct file operation failed for ${toolName}: ${error}`, 'ERROR');
+      
+      try {
+        // Send failure notification
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "failed",
+            content: [
+              {
+                type: "content",
+                content: {
+                  type: "text",
+                  text: `⚠️ ACP direct operation failed: ${error instanceof Error ? error.message : String(error)}.\nFalling back to Claude tools for compatibility.`,
+                },
+              },
+            ],
+            rawOutput: { 
+              error: error instanceof Error ? error.message : String(error),
+              fallback: true 
+            },
+          },
+        });
+      } catch (updateError) {
+        this.log(`Failed to send error update: ${updateError}`, 'ERROR');
+      }
+
+      // Return false to indicate fallback to Claude tools is needed
+      return false;
+    }
+
+    // Not a supported direct operation, fallback to Claude tools
+    return false;
+  }
+
+  /**
+   * Determines if we should request permission for a specific tool operation.
+   * Based on permission mode and tool sensitivity.
+   */
+  private async shouldRequestPermissionForTool(
+    sessionId: string,
+    toolName: string,
+    _input: unknown
+  ): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    const permissionMode = session?.permissionMode || this.defaultPermissionMode;
+
+    // Skip permission requests in certain modes
+    if (permissionMode === 'bypassPermissions' || permissionMode === 'acceptEdits') {
+      return false;
+    }
+
+    // Always request permission in plan mode
+    if (permissionMode === 'plan') {
+      return true;
+    }
+
+    const lowerToolName = toolName.toLowerCase();
+    
+    // Sensitive operations that should always ask for permission
+    const sensitiveTools = [
+      'bash', 'execute', 'run',  // Command execution
+      'write', 'edit', 'multiedit',  // File modification
+      'delete', 'remove',  // File deletion
+      'move', 'rename'  // File system changes
+    ];
+
+    return sensitiveTools.some(sensitive => lowerToolName.includes(sensitive));
+  }
+
+  /**
+   * Gets a human-readable description of what a tool operation will do.
+   */
+  private getToolDescription(toolName: string, input: unknown): string {
+    const lowerToolName = toolName.toLowerCase();
+    
+    if (!input || typeof input !== 'object' || input === null) {
+      return `Execute ${toolName}`;
+    }
+
+    const inputObj = input as Record<string, unknown>;
+
+    // Bash/Execute operations
+    if (lowerToolName.includes('bash') || lowerToolName.includes('execute')) {
+      if (inputObj.command && typeof inputObj.command === 'string') {
+        const cmd = String(inputObj.command).substring(0, 50);
+        return `Execute command: ${cmd}${cmd.length > 50 ? '...' : ''}`;
+      }
+      return `Execute shell command`;
+    }
+
+    // File operations
+    if (lowerToolName.includes('write') || lowerToolName.includes('edit')) {
+      if (inputObj.file_path) {
+        const content = inputObj.content ? ` (${String(inputObj.content).length} chars)` : '';
+        return `Modify file ${inputObj.file_path}${content}`;
+      }
+      return `Modify files`;
+    }
+
+    if (lowerToolName.includes('delete') || lowerToolName.includes('remove')) {
+      if (inputObj.file_path || inputObj.path) {
+        return `Delete ${inputObj.file_path || inputObj.path}`;
+      }
+      return `Delete files`;
+    }
+
+    if (lowerToolName.includes('move') || lowerToolName.includes('rename')) {
+      if (inputObj.source && inputObj.destination) {
+        return `Move ${inputObj.source} to ${inputObj.destination}`;
+      }
+      return `Move/rename files`;
+    }
+
+    return `Execute ${toolName}`;
   }
 
   private getEnhancedToolTitle(toolName: string, input?: unknown): string {
