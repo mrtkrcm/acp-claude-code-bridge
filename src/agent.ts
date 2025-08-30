@@ -508,13 +508,15 @@ export class ClaudeACPAgent implements Agent {
                 `Tool use block in assistant message: ${content.name}, id: ${content.id}`,
               );
 
-              // Send tool_call notification to client
+              // Send tool_call notification to client with enhanced title
+              const toolTitle = this.getEnhancedToolTitle(content.name || "Tool", content.input);
+              
               await this.client.sessionUpdate({
                 sessionId,
                 update: {
                   sessionUpdate: "tool_call",
                   toolCallId: content.id || "",
-                  title: content.name || "Tool",
+                  title: toolTitle,
                   kind: this.mapToolKind(content.name || ""),
                   status: "pending",
                   rawInput: content.input as Record<string, unknown>,
@@ -613,12 +615,15 @@ export class ClaudeACPAgent implements Agent {
           }
         }
 
+        // Enhanced tool call with descriptive title
+        const toolTitle = this.getEnhancedToolTitle(msg.tool_name || "Tool", input);
+        
         await this.client.sessionUpdate({
           sessionId,
           update: {
             sessionUpdate: "tool_call",
             toolCallId: msg.id || "",
-            title: msg.tool_name || "Tool",
+            title: toolTitle,
             kind: this.mapToolKind(msg.tool_name || ""),
             status: "pending",
             // Pass the input directly without extra processing
@@ -763,6 +768,41 @@ export class ClaudeACPAgent implements Agent {
           JSON.stringify(message).substring(0, 500),
         );
     }
+  }
+
+  private getEnhancedToolTitle(toolName: string, input?: unknown): string {
+    const lowerName = toolName.toLowerCase();
+    
+    // Extract useful information from input for better titles
+    if (input && typeof input === 'object' && input !== null) {
+      const inputObj = input as Record<string, unknown>;
+      
+      // File operations - show filename
+      if ((lowerName.includes('read') || lowerName.includes('write') || lowerName.includes('edit')) && inputObj.file_path) {
+        const filename = String(inputObj.file_path).split('/').pop();
+        return `${toolName}: ${filename}`;
+      }
+      
+      // Search operations - show pattern
+      if (lowerName.includes('grep') && inputObj.pattern) {
+        return `${toolName}: "${inputObj.pattern}"`;
+      }
+      
+      // Bash commands - show command preview
+      if (lowerName.includes('bash') && inputObj.command) {
+        const cmd = String(inputObj.command).substring(0, 30);
+        return `${toolName}: ${cmd}${cmd.length > 30 ? '...' : ''}`;
+      }
+      
+      // Todo operations - show count
+      if (lowerName.includes('todo') && inputObj.todos && Array.isArray(inputObj.todos)) {
+        const count = inputObj.todos.length;
+        return `${toolName}: ${count} task${count === 1 ? '' : 's'}`;
+      }
+    }
+    
+    // Default to tool name
+    return toolName;
   }
 
   private mapToolKind(
