@@ -111,6 +111,11 @@ export class ClaudeACPAgent implements Agent {
       
       // Also cleanup orphaned agent sessions
       this.cleanupOrphanedSessions();
+      
+      // Cleanup old persisted sessions
+      this.sessionPersistence.cleanup().catch(error => {
+        this.logger.warn(`Session persistence cleanup failed: ${error}`);
+      });
     }, 60 * 60 * 1000);
 
     // Streaming and batch cleanup (more frequent)
@@ -325,7 +330,7 @@ export class ClaudeACPAgent implements Agent {
         createdAt: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
-          version: '0.5.4'
+          version: '0.8.1'
         }
       });
     } catch (error) {
@@ -338,7 +343,7 @@ export class ClaudeACPAgent implements Agent {
               sessionId,
               permissionMode: this.defaultPermissionMode,
               createdAt: new Date().toISOString(),
-              metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.7.1' }
+              metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.8.1' }
             });
           } catch (retryError) {
             this.logger.warn(`Session save retry failed: ${retryError}`, { sessionId });
@@ -477,6 +482,11 @@ export class ClaudeACPAgent implements Agent {
       const contextWarning = this.contextMonitor.addMessage(currentSessionId, promptText);
       if (contextWarning) {
         this.logger.debug(`Context warning: ${contextWarning.message}`);
+        
+        // Persist updated context stats
+        this.persistContextStats(currentSessionId).catch(error => {
+          this.logger.warn(`Failed to persist context stats: ${error}`, { sessionId: currentSessionId });
+        });
         
         // Send context status as a subtle message to user with enhanced formatting
         if (contextWarning.level === 'critical') {
@@ -2386,6 +2396,29 @@ export class ClaudeACPAgent implements Agent {
 
   private generateBatchId(): string {
     return `batch_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  private async persistContextStats(sessionId: string): Promise<void> {
+    const contextStats = this.contextMonitor.getStats(sessionId);
+    if (!contextStats) return;
+    
+    try {
+      const existingSession = await this.sessionPersistence.loadSession(sessionId);
+      if (existingSession) {
+        await this.sessionPersistence.saveSession({
+          ...existingSession,
+          contextStats: {
+            estimatedTokens: contextStats.estimatedTokens,
+            messages: contextStats.messages,
+            turnCount: contextStats.turnCount,
+            lastUpdate: contextStats.lastUpdate.toISOString()
+          }
+        });
+      }
+    } catch (error) {
+      // Don't throw - this is a background operation
+      this.logger.warn(`Context stats persistence failed: ${error}`, { sessionId });
+    }
   }
 
   private shouldBatchToolCalls(toolNames: string[]): boolean {
