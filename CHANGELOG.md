@@ -1,3 +1,95 @@
+## [0.11.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.10.0...v0.11.0) (2024-08-31)
+
+### Features
+
+* implement robust session management with race condition prevention ([c166f4d](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/c166f4d))
+* comprehensive session management robustness validation ([0955334](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/0955334))
+
+### Bug Fixes
+
+* cleanup: remove temporary files and organize project structure ([128c421](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/128c421))
+* cleanup: remove temporary test report from git tracking ([d93e94c](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/d93e94c))
+
+### Performance
+
+* session synchronization with withSessionLock() to prevent race conditions
+* conservative session cleanup aligned with Claude Code lifecycle
+* memory monitoring and cleanup for 200+ concurrent sessions
+* enhanced context monitoring with persistent statistics
+
+## [0.10.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.9.0...v0.10.0) (2024-08-31)
+
+### Features
+
+* improve todo display and fix runtime issues ([62f53d7](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/62f53d7))
+* elegant and concise ACP integration improvements ([8e88753](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/8e88753))
+* improve UX visibility and remove truncation ([6006311](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/6006311))
+
+### Bug Fixes
+
+* simplify task progress display for Zed compatibility ([a8270e0](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/a8270e0))
+
+### UI/UX
+
+* single-line todo display with pipe separator and icons
+* optimized rendering for Zed editor compatibility
+* removed truncation to preserve full task visibility
+
+## [0.9.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.8.0...v0.9.0) (2024-08-31)
+
+### Features
+
+* stabilize session management and enhance documentation ([022686d](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/022686d))
+
+### Bug Fixes
+
+* update Claude Code dependency to correct version 1.0.98 ([ff10df0](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/ff10df0))
+
+### Documentation
+
+* comprehensive CLAUDE.md with architecture details
+* enhanced README with troubleshooting guides
+* session persistence documentation
+
+## [0.8.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.7.0...v0.8.0) (2024-08-31)
+
+### Features
+
+* enhance UX with setup wizard and error recovery ([8baadbc](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/8baadbc))
+* fix binary name and enhance task progress display ([d8ad283](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/d8ad283))
+
+### Enhancements
+
+* diagnostic system with compatibility scoring
+* enhanced error messages and recovery patterns
+* improved task progress visualization
+
+## [0.7.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.6.0...v0.7.0) (2024-08-31)
+
+### Features
+
+* standardize and enhance ACP permission system ([05f1e0a](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/05f1e0a))
+
+### Permissions
+
+* runtime permission mode switching
+* granular tool permission configuration
+* client capability detection
+* enhanced permission request handling
+
+## [0.6.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.5.4...v0.6.0) (2024-08-31)
+
+### Features
+
+* rebrand as @mrtkrcm/acp-claude-code scoped package ([f07a304](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/f07a304))
+* optimize code quality with centralized logging and DRY patterns ([df41899](https://github.com/mrtkrcm/acp-claude-code-bridge/commit/df41899))
+
+### Infrastructure
+
+* centralized logging system with debug mode support
+* code quality improvements with DRY patterns
+* package rebranding and scoping
+
 ## [0.5.4](https://github.com/xuanwo/acp-claude-code/compare/v0.5.3...v0.5.4) (2025-08-30)
 
 ### Bug Fixes

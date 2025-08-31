@@ -55,11 +55,13 @@ claude setup-token
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ACP_PERMISSION_MODE` | `default` | Permission behavior |
-| `ACP_MAX_TURNS` | `100` | Session limit (0 = unlimited) |
-| `ACP_DEBUG` | `false` | Enable debug logging |
+| Variable | Default | Description | Example |
+|----------|---------|-------------|---------|
+| `ACP_PERMISSION_MODE` | `default` | Permission behavior | `acceptEdits` |
+| `ACP_MAX_TURNS` | `100` | Session limit (0 = unlimited) | `0` |
+| `ACP_DEBUG` | `false` | Enable debug logging | `true` |
+| `ACP_LOG_FILE` | none | Log to file | `/tmp/acp.log` |
+| `ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE` | auto-detect | Custom Claude path | `/usr/local/bin/claude` |
 
 ### Runtime Permission Switching
 
@@ -99,6 +101,44 @@ claude setup-token
 ```json
 { "env": { "ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE": "/path/to/claude" } }
 ```
+
+**Session Management Issues**
+```bash
+# Check session storage
+ls ~/.acp-claude-code/sessions/
+
+# Clear problematic sessions
+rm ~/.acp-claude-code/sessions/session-*.json
+
+# Verify permissions
+chmod 755 ~/.acp-claude-code/
+```
+
+**Permission Denied Errors**
+```bash
+# Enable debug logging
+ACP_DEBUG=true npx @mrtkrcm/acp-claude-code
+
+# Switch to accept mode temporarily
+[ACP:PERMISSION:ACCEPT_EDITS]
+
+# Reset to default behavior
+[ACP:PERMISSION:DEFAULT]
+```
+
+**Performance Issues**
+```bash
+# Check system compatibility
+npx @mrtkrcm/acp-claude-code --diagnose
+
+# Monitor memory usage
+ACP_DEBUG=true ACP_LOG_FILE=/tmp/acp.log npx @mrtkrcm/acp-claude-code
+```
+
+**Context Window Warnings**
+- **At 80%**: Consider shorter prompts or start new session
+- **At 95%**: Create new session to avoid truncation  
+- **Full context**: Session automatically cleaned up
 
 ## Advanced Configuration
 
@@ -177,6 +217,29 @@ Zed Editor ←→ ACP Protocol ←→ Bridge ←→ Claude SDK ←→ Claude API
 - **Context Tracking** - 200K token window with warnings at 80%/95%
 - **Smart Cleanup** - Old sessions auto-deleted after 7 days
 - **Resume Support** - Conversations continue seamlessly
+- **Race Prevention** - Session synchronization prevents data corruption
+- **Memory Limits** - 200 max concurrent sessions with automatic cleanup
+
+### Session Persistence Configuration
+
+Sessions are stored in `~/.acp-claude-code/sessions/` with configurable limits:
+
+```typescript
+interface SessionConfig {
+  maxSessions: 100        // Maximum stored sessions
+  maxAge: 7 * 24 * 60 * 60 * 1000  // 7 days in milliseconds
+  maxEnhancedContent: 50  // Enhanced content items per session
+}
+```
+
+**Cleanup Commands:**
+```bash
+# Manual cleanup of old sessions
+pnpm run cleanup
+
+# Check session storage usage  
+pnpm run maintenance
+```
 
 ## License
 

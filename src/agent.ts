@@ -43,7 +43,17 @@ interface AgentSession {
   claudeSessionId?: string; // Claude's actual session_id, obtained after first message
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan"; // Permission mode for this session
   toolPermissions?: ToolPermissionConfig; // Per-session tool permissions
-  [key: string]: unknown; // Allow dynamic properties for warnings
+  // Typed properties for session metadata
+  lastActivity?: Date;
+  contextWarning?: string;
+  turnWarning?: string;
+  memoryWarning?: string;
+  createdAt?: Date;
+  sessionMetadata?: {
+    userAgent?: string;
+    clientVersion?: string;
+    platform?: string;
+  };
 }
 
 export class ClaudeACPAgent implements Agent {
@@ -79,8 +89,22 @@ export class ClaudeACPAgent implements Agent {
     }
 
     const permissionMode = process.env.ACP_PERMISSION_MODE;
-    if (permissionMode && !["default", "acceptEdits", "bypassPermissions", "plan"].includes(permissionMode)) {
-      throw new Error(`Invalid ACP_PERMISSION_MODE: "${permissionMode}". Must be one of: default, acceptEdits, bypassPermissions, plan`);
+    const validPermissionModes = ["default", "acceptEdits", "bypassPermissions", "plan"] as const;
+    type ValidPermissionMode = typeof validPermissionModes[number];
+    if (permissionMode && !validPermissionModes.includes(permissionMode as ValidPermissionMode)) {
+      throw new Error(`Invalid ACP_PERMISSION_MODE: "${permissionMode}". Must be one of: ${validPermissionModes.join(', ')}`);
+    }
+
+    // Validate log file path if provided
+    const logFile = process.env.ACP_LOG_FILE;
+    if (logFile && typeof logFile !== 'string') {
+      throw new Error(`Invalid ACP_LOG_FILE: must be a string path`);
+    }
+
+    // Validate debug flag
+    const debugMode = process.env.ACP_DEBUG;
+    if (debugMode && !['true', 'false'].includes(debugMode)) {
+      throw new Error(`Invalid ACP_DEBUG: "${debugMode}" must be 'true' or 'false'`);
     }
   }
 
@@ -595,8 +619,8 @@ export class ClaudeACPAgent implements Agent {
               
               // Send warning to user (only once per session)
               const warningKey: string = `turn_warning_${session.claudeSessionId}`;
-              if (!(warningKey in session)) {
-                session[warningKey] = true;
+              if (!session.turnWarning || session.turnWarning !== warningKey) {
+                session.turnWarning = warningKey;
                 
                 await this.client.sessionUpdate({
                   sessionId: currentSessionId,
