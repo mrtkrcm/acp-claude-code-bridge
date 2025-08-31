@@ -1158,6 +1158,7 @@ export class ClaudeACPAgent implements Agent {
         const toolTitle = this.getEnhancedToolTitle(msg.tool_name || "Tool", input);
         const toolLocation = this.getToolLocation(msg.tool_name || "Tool", input);
         
+        // Send initial pending status
         await this.client.sessionUpdate({
           sessionId,
           update: {
@@ -1169,6 +1170,25 @@ export class ClaudeACPAgent implements Agent {
             rawInput: input as Record<string, unknown>,
           },
         });
+        
+        // Send in_progress status when execution begins
+        setTimeout(async () => {
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update" as const,
+              toolCallId: msg.id || "",
+              status: "in_progress" as const,
+              content: [{
+                type: "content" as const,
+                content: {
+                  type: "text" as const,
+                  text: `Executing ${toolTitle}...`
+                }
+              }]
+            },
+          });
+        }, 100); // Small delay to ensure UI shows transition
         
         // Log location if available
         if (toolLocation) {
@@ -1849,6 +1869,23 @@ export class ClaudeACPAgent implements Agent {
           return true; // Handled, don't fall back
         }
 
+        // Send in_progress status before starting file read
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update" as const,
+            toolCallId,
+            status: "in_progress" as const,
+            content: [{
+              type: "content" as const,
+              content: {
+                type: "text" as const,
+                text: `Reading ${filePath.split('/').pop()}...`
+              }
+            }]
+          },
+        });
+        
         // Validate and prepare read parameters
         const readParams: ReadTextFileRequest = {
           sessionId,
@@ -1969,6 +2006,23 @@ export class ClaudeACPAgent implements Agent {
           return true; // Handled, don't fall back
         }
 
+        // Send in_progress status before starting file write
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update" as const,
+            toolCallId,
+            status: "in_progress" as const,
+            content: [{
+              type: "content" as const,
+              content: {
+                type: "text" as const,
+                text: `Writing ${content.length} characters to ${filePath.split('/').pop()}...`
+              }
+            }]
+          },
+        });
+        
         const writeParams: WriteTextFileRequest = {
           sessionId,
           path: filePath,
