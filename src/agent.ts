@@ -2844,12 +2844,11 @@ export class ClaudeACPAgent implements Agent {
     const STALE_THRESHOLD = 60 * 60 * 1000; // 1 hour
     let cleanedCount = 0;
 
-    for (const [batchId, batch] of this.activeBatches.entries()) {
-      // Remove completed or stale batches (simplified check)
+    for (const [batchId] of this.activeBatches.entries()) {
+      // Remove completed batches
       const isComplete = this.isBatchComplete(batchId);
-      const hasTimeout = batch.timeoutId && Date.now() > STALE_THRESHOLD;
       
-      if (isComplete || hasTimeout) {
+      if (isComplete) {
         this.activeBatches.delete(batchId);
         cleanedCount++;
       }
