@@ -397,4 +397,54 @@ export class DiagnosticSystem {
     
     return output;
   }
+  
+  /**
+   * Perform a health check with timing and error handling
+   */
+  private static async performHealthCheck(
+    name: string,
+    healthChecks: Array<{ name: string; status: 'pass' | 'fail' | 'warn'; message: string; duration?: number }>,
+    check: () => Promise<void>
+  ): Promise<void> {
+    const startTime = Date.now();
+    
+    try {
+      await check();
+      healthChecks.push({
+        name,
+        status: 'pass',
+        message: 'OK',
+        duration: Date.now() - startTime
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isWarning = message.toLowerCase().includes('warning') || message.toLowerCase().includes('slow');
+      
+      healthChecks.push({
+        name,
+        status: isWarning ? 'warn' : 'fail',
+        message,
+        duration: Date.now() - startTime
+      });
+    }
+  }
+  
+  /**
+   * Get real-time system metrics
+   */
+  static getSystemMetrics(): {
+    memory: NodeJS.MemoryUsage;
+    uptime: number;
+    cpuUsage: NodeJS.CpuUsage;
+    platform: NodeJS.Platform;
+    version: string;
+  } {
+    return {
+      memory: process.memoryUsage(),
+      uptime: process.uptime(),
+      cpuUsage: process.cpuUsage(),
+      platform: process.platform,
+      version: process.version,
+    };
+  }
 }

@@ -21,6 +21,7 @@ import {
 } from "@zed-industries/agent-client-protocol";
 import type { ClaudeMessage, ClaudeStreamEvent } from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
+import { SessionPersistenceManager, getDefaultPersistenceManager } from "./session-persistence.js";
 import { createWriteStream } from "node:fs";
 import { resolve } from "node:path";
 
@@ -41,6 +42,9 @@ export class ClaudeACPAgent implements Agent {
   private defaultPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   private pathToClaudeCodeExecutable: string | undefined;
   private clientCapabilities: ClientCapabilities = {};
+  private readonly MAX_RETRY_ATTEMPTS = 3;
+  private readonly RETRY_DELAY_MS = 1000;
+  private sessionPersistence: SessionPersistenceManager;
 
   private static validateConfig() {
     const maxTurns = process.env.ACP_MAX_TURNS;
@@ -64,15 +68,20 @@ export class ClaudeACPAgent implements Agent {
     this.pathToClaudeCodeExecutable = process.env.ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE;
     
     this.contextMonitor = new ContextMonitor(this.DEBUG);
+    this.sessionPersistence = getDefaultPersistenceManager();
     this.initializeLogging();
     
-    this.log(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`);
+    this.log(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`, 'INFO', {
+      maxTurns: this.maxTurns,
+      permissionMode: this.defaultPermissionMode,
+      debugMode: this.DEBUG
+    });
     
     // Enhanced session cleanup with logging
     setInterval(() => {
       const cleanedCount = this.contextMonitor.cleanupOldSessions();
       if (cleanedCount > 0) {
-        this.log(`Cleaned up ${cleanedCount} old context sessions`);
+        this.log(`Cleaned up ${cleanedCount} old context sessions`, 'DEBUG');
       }
       
       // Also cleanup orphaned agent sessions
@@ -113,29 +122,52 @@ export class ClaudeACPAgent implements Agent {
     }
   }
 
-  private log(message: string, ...args: unknown[]) {
-    const timestamp = new Date().toISOString();
-    const fullMessage = `[${timestamp}] [DEBUG] [ClaudeACPAgent] ${message}`;
-    const argsStr = args.length > 0 ? ` ${args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ')}` : '';
+  private log(message: string, levelOrArgs?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | unknown, context?: Record<string, unknown>, ...args: unknown[]) {
+    // Handle both old and new calling conventions
+    let level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' = 'DEBUG';
+    let allArgs = args;
     
-    if (this.DEBUG) {
-      console.error(fullMessage + argsStr);
+    if (typeof levelOrArgs === 'string' && ['DEBUG', 'INFO', 'WARN', 'ERROR'].includes(levelOrArgs)) {
+      level = levelOrArgs as 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+    } else if (levelOrArgs !== undefined) {
+      // Old style call - levelOrArgs is actually an argument
+      allArgs = [levelOrArgs, ...args];
+    }
+    const timestamp = new Date().toISOString();
+    
+    // Structured logging format
+    const logEntry = {
+      timestamp,
+      level,
+      component: 'ClaudeACPAgent',
+      message,
+      context: context || {},
+      args: allArgs.length > 0 ? allArgs.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)) : undefined
+    };
+    
+    const formattedMessage = `[${timestamp}] [${level}] [ClaudeACPAgent] ${message}`;
+    const argsStr = allArgs.length > 0 ? ` ${logEntry.args!.join(' ')}` : '';
+    
+    // Console output based on level and debug setting
+    if (this.DEBUG || level !== 'DEBUG') {
+      const consoleMethod = level === 'ERROR' ? console.error : level === 'WARN' ? console.warn : console.log;
+      consoleMethod(formattedMessage + argsStr);
     }
     
-    // Log to file if configured
+    // Structured file logging
     if (this.fileLogger) {
-      this.fileLogger.write(fullMessage + argsStr + '\n');
+      this.fileLogger.write(JSON.stringify(logEntry) + '\n');
     }
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
-    this.log(`Initialize with protocol version: ${params.protocolVersion}`);
-    this.log(`Client capabilities: ${JSON.stringify(params.clientCapabilities || {})}`);
+    this.log(`Initialize with protocol version: ${params.protocolVersion}`, 'DEBUG');
+    this.log(`Client capabilities: ${JSON.stringify(params.clientCapabilities || {})}`, 'DEBUG');
 
     // Store client capabilities for direct operations
     this.clientCapabilities = params.clientCapabilities || {};
     this.log(`File system capabilities: readTextFile=${this.clientCapabilities.fs?.readTextFile}, writeTextFile=${this.clientCapabilities.fs?.writeTextFile}`);
-    this.log(`Permission system: ACP supports native permission dialogs=${!!this.client.requestPermission}`);
+    this.log(`Permission system: ACP supports native permission dialogs=${!!this.client.requestPermission}`, 'DEBUG');
 
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -146,21 +178,38 @@ export class ClaudeACPAgent implements Agent {
   }
 
   async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
-    this.log("Creating new session");
+    this.log("Creating new session", 'INFO');
 
-    // For now, create a temporary session ID
-    // We'll get the real Claude session_id on the first message
-    // and store it for future use
-    const sessionId = Math.random().toString(36).substring(2);
+    // Create a session ID with timestamp for better uniqueness
+    const timestamp = Date.now().toString(36);
+    const random = Math.random().toString(36).substring(2);
+    const sessionId = `${timestamp}-${random}`;
 
-    this.sessions.set(sessionId, {
+    const sessionData = {
       pendingPrompt: null,
       abortController: null,
       claudeSessionId: undefined, // Will be set after first message
       permissionMode: this.defaultPermissionMode,
-    });
+    };
 
-    this.log(`Created session: ${sessionId}`);
+    this.sessions.set(sessionId, sessionData);
+    
+    // Persist session metadata
+    try {
+      await this.sessionPersistence.saveSession({
+        sessionId,
+        permissionMode: this.defaultPermissionMode,
+        createdAt: new Date().toISOString(),
+        metadata: {
+          userAgent: 'ACP-Claude-Code-Bridge',
+          version: '0.5.4'
+        }
+      });
+    } catch (error) {
+      this.log(`Failed to persist session metadata: ${error}`, 'WARN', { sessionId });
+    }
+
+    this.log(`Created session: ${sessionId}`, 'INFO', { sessionId, permissionMode: this.defaultPermissionMode });
 
     return {
       sessionId,
@@ -168,19 +217,59 @@ export class ClaudeACPAgent implements Agent {
   }
 
   async loadSession?(params: LoadSessionRequest): Promise<void> {
-    this.log(`Loading session: ${params.sessionId}`);
+    this.log(`Loading session: ${params.sessionId}`, 'INFO', { sessionId: params.sessionId });
 
-    // Check if we already have this session
+    // Check if we already have this session in memory
     const existingSession = this.sessions.get(params.sessionId);
     if (existingSession) {
       this.log(
-        `Session ${params.sessionId} already exists with Claude session_id: ${existingSession.claudeSessionId}`,
+        `Session ${params.sessionId} already exists in memory with Claude session_id: ${existingSession.claudeSessionId}`,
+        'DEBUG',
+        { sessionId: params.sessionId, claudeSessionId: existingSession.claudeSessionId }
       );
-      // Keep the existing session with its Claude session_id intact
-      return; // Return null to indicate success
+      return;
     }
 
-    // Create a new session entry for this ID if it doesn't exist
+    // Try to load session from persistent storage
+    try {
+      const persistedSession = await this.sessionPersistence.loadSession(params.sessionId);
+      
+      if (persistedSession) {
+        this.log(`Loaded session from persistence: ${params.sessionId}`, 'INFO', {
+          sessionId: params.sessionId,
+          claudeSessionId: persistedSession.claudeSessionId,
+          permissionMode: persistedSession.permissionMode,
+          createdAt: persistedSession.createdAt
+        });
+        
+        // Restore session state from persistence
+        this.sessions.set(params.sessionId, {
+          pendingPrompt: null,
+          abortController: null,
+          claudeSessionId: persistedSession.claudeSessionId,
+          permissionMode: (persistedSession.permissionMode as typeof this.defaultPermissionMode) || this.defaultPermissionMode,
+        });
+        
+        // Restore context stats if available
+        if (persistedSession.contextStats) {
+          // Note: This would require expanding ContextMonitor to support restoration
+          this.log(`Context stats available for restoration`, 'DEBUG', {
+            sessionId: params.sessionId,
+            tokens: persistedSession.contextStats.estimatedTokens,
+            messages: persistedSession.contextStats.messages
+          });
+        }
+        
+        return;
+      }
+    } catch (error) {
+      this.log(`Failed to load session from persistence: ${error}`, 'WARN', {
+        sessionId: params.sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    // Create a new session entry if not found in persistence
     // This handles the case where the agent restarts but Zed still has the session ID
     this.sessions.set(params.sessionId, {
       pendingPrompt: null,
@@ -191,15 +280,16 @@ export class ClaudeACPAgent implements Agent {
 
     this.log(
       `Created new session entry for loaded session: ${params.sessionId}`,
+      'INFO',
+      { sessionId: params.sessionId, permissionMode: this.defaultPermissionMode }
     );
-    return; // Return null to indicate success
   }
 
   async authenticate(_params: AuthenticateRequest): Promise<void> {
-    this.log("Authenticate called");
+    this.log("Authenticate called", 'DEBUG');
     // Claude Code SDK handles authentication internally through ~/.claude/config.json
     // Users should run `claude setup-token` or login through the CLI
-    this.log("Using Claude Code authentication from ~/.claude/config.json");
+    this.log("Using Claude Code authentication from ~/.claude/config.json", 'DEBUG');
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -214,7 +304,7 @@ export class ClaudeACPAgent implements Agent {
       throw new Error(`Session ${currentSessionId} not found`);
     }
 
-    this.log(`Processing prompt for session: ${currentSessionId}`);
+    this.log(`Processing prompt for session: ${currentSessionId}`, 'DEBUG');
     this.log(
       `Session state: claudeSessionId=${session.claudeSessionId}, pendingPrompt=${!!session.pendingPrompt}, abortController=${!!session.abortController}`,
     );
@@ -246,7 +336,7 @@ export class ClaudeACPAgent implements Agent {
       // Track context usage for user message
       const contextWarning = this.contextMonitor.trackMessage(currentSessionId, promptText, 'user');
       if (contextWarning) {
-        this.log(`Context warning: ${contextWarning.message}`);
+        this.log(`Context warning: ${contextWarning.message}`, 'DEBUG');
         
         // Send context status as a subtle message to user with enhanced formatting
         if (contextWarning.level === 'critical') {
@@ -281,7 +371,7 @@ export class ClaudeACPAgent implements Agent {
       if (!session.claudeSessionId) {
         this.log("First message for this session, no resume");
       } else {
-        this.log(`Resuming Claude session: ${session.claudeSessionId}`);
+        this.log(`Resuming Claude session: ${session.claudeSessionId}`, 'DEBUG');
       }
 
       // Check for permission mode hints in the prompt
@@ -299,7 +389,7 @@ export class ClaudeACPAgent implements Agent {
         session.permissionMode = "default";
       }
 
-      this.log(`Using permission mode: ${permissionMode}`);
+      this.log(`Using permission mode: ${permissionMode}`, 'DEBUG');
 
       // Start Claude query with configurable turn limit (0 = unlimited)
       const queryOptions: Record<string, unknown> = {
@@ -313,7 +403,7 @@ export class ClaudeACPAgent implements Agent {
         queryOptions.maxTurns = this.maxTurns;
       }
       
-      this.log(`Starting query with${this.maxTurns === 0 ? ' unlimited' : ` ${this.maxTurns}`} turns`);
+      this.log(`Starting query with${this.maxTurns === 0 ? ' unlimited' : ` ${this.maxTurns}`} turns`, 'DEBUG');
       
       const messages = query({
         prompt: queryInput,
@@ -342,7 +432,7 @@ export class ClaudeACPAgent implements Agent {
           if (this.maxTurns > 0) {
             const warningThreshold = Math.max(10, this.maxTurns * 0.8);
             if (turnCount >= warningThreshold && turnCount < this.maxTurns) {
-              this.log(`Turn warning: ${turnCount}/${this.maxTurns} turns used`);
+              this.log(`Turn warning: ${turnCount}/${this.maxTurns} turns used`, 'DEBUG');
               
               // Send warning to user (only once per session)
               const warningKey: string = `turn_warning_${session.claudeSessionId}`;
@@ -363,7 +453,7 @@ export class ClaudeACPAgent implements Agent {
             }
           } else if (turnCount % 50 === 0 && turnCount > 0) {
             // Log progress for unlimited sessions every 50 turns
-            this.log(`Unlimited session progress: ${turnCount} turns completed`);
+            this.log(`Unlimited session progress: ${turnCount} turns completed`, 'DEBUG');
           }
         }
         
@@ -389,9 +479,9 @@ export class ClaudeACPAgent implements Agent {
 
         // Log message type and content for debugging
         if (sdkMessage.type === "user") {
-          this.log(`Processing user message`);
+          this.log(`Processing user message`, 'DEBUG');
         } else if (sdkMessage.type === "assistant") {
-          this.log(`Processing assistant message`);
+          this.log(`Processing assistant message`, 'DEBUG');
           // Log assistant message content for debugging
           if ("message" in sdkMessage && sdkMessage.message) {
             const assistantMsg = sdkMessage.message as {
@@ -411,8 +501,8 @@ export class ClaudeACPAgent implements Agent {
         );
       }
 
-      this.log(`Processed ${messageCount} messages total`);
-      this.log(`Final Claude session_id: ${session.claudeSessionId}`);
+      this.log(`Processed ${messageCount} messages total`, 'DEBUG');
+      this.log(`Final Claude session_id: ${session.claudeSessionId}`, 'DEBUG');
       session.pendingPrompt = null;
 
       // Ensure the session is properly saved with the Claude session_id
@@ -427,7 +517,7 @@ export class ClaudeACPAgent implements Agent {
       // Enhanced error logging with context
       const contextStats = this.contextMonitor.getStats(currentSessionId);
       if (contextStats) {
-        this.log(`Error occurred at context usage: ${(contextStats.usage * 100).toFixed(1)}%`);
+        this.log(`Error occurred at context usage: ${(contextStats.usage * 100).toFixed(1)}%`, 'DEBUG');
       }
 
       if (session.abortController?.signal.aborted) {
@@ -459,7 +549,7 @@ export class ClaudeACPAgent implements Agent {
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    this.log(`Cancel requested for session: ${params.sessionId}`);
+    this.log(`Cancel requested for session: ${params.sessionId}`, 'DEBUG');
 
     const session = this.sessions.get(params.sessionId);
     if (session) {
@@ -494,7 +584,7 @@ export class ClaudeACPAgent implements Agent {
         if (msg.message && msg.message.content) {
           for (const content of msg.message.content) {
             if (content.type === "tool_result") {
-              this.log(`Tool result received for: ${content.tool_use_id}`);
+              this.log(`Tool result received for: ${content.tool_use_id}`, 'DEBUG');
               
               // Send tool_call_update with completed status
               await this.client.sessionUpdate({
@@ -530,7 +620,7 @@ export class ClaudeACPAgent implements Agent {
               // Track context usage for assistant message with enhanced monitoring
               const assistantContextWarning = this.contextMonitor.trackMessage(sessionId, text, 'assistant');
               if (assistantContextWarning && assistantContextWarning.level === 'critical') {
-                this.log(`Critical context usage detected: ${assistantContextWarning.message}`);
+                this.log(`Critical context usage detected: ${assistantContextWarning.message}`, 'DEBUG');
                 // Could notify user here if needed, but avoid interrupting the flow
               }
               
@@ -759,7 +849,7 @@ export class ClaudeACPAgent implements Agent {
         
         // Log location if available
         if (toolLocation) {
-          this.log(`Tool location: ${toolLocation.path}${toolLocation.line ? `:${toolLocation.line}` : ''}`);
+          this.log(`Tool location: ${toolLocation.path}${toolLocation.line ? `:${toolLocation.line}` : ''}`, 'DEBUG');
         }
 
         // For TodoWrite tool, also send formatted todo list as text
@@ -809,8 +899,8 @@ export class ClaudeACPAgent implements Agent {
         const outputText = msg.output || "";
 
         // Log the tool output for debugging
-        this.log(`Tool call completed: ${msg.id}`);
-        this.log(`Tool output length: ${outputText.length} characters`);
+        this.log(`Tool call completed: ${msg.id}`, 'DEBUG');
+        this.log(`Tool output length: ${outputText.length} characters`, 'DEBUG');
 
         await this.client.sessionUpdate({
           sessionId,
@@ -888,7 +978,7 @@ export class ClaudeACPAgent implements Agent {
           });
         } else if (event.type === "content_block_stop") {
           // Content block ended - Claude handles its own formatting
-          this.log("Content block stopped");
+          this.log("Content block stopped", 'DEBUG');
         }
         break;
       }
@@ -930,24 +1020,24 @@ export class ClaudeACPAgent implements Agent {
     this.log(`Permission check for '${operation}' - Mode: ${permissionMode}, Context: ${contextStats ? (contextStats.usage * 100).toFixed(1) + '%' : 'N/A'}`);
 
     if (permissionMode === 'bypassPermissions') {
-      this.log(`\u2705 Bypassing permission request for ${operation} (mode: ${permissionMode})`);
+      this.log(`\u2705 Bypassing permission request for ${operation} (mode: ${permissionMode})`, 'DEBUG');
       return 'allowed';
     }
 
     if (permissionMode === 'acceptEdits') {
       // More granular control for acceptEdits mode
       if (toolCall.kind === 'execute' || operation.toLowerCase().includes('bash')) {
-        this.log(`\u26a0\ufe0f Execute operation requires explicit permission even in acceptEdits mode`);
+        this.log(`\u26a0\ufe0f Execute operation requires explicit permission even in acceptEdits mode`, 'DEBUG');
         // Continue to permission dialog
       } else {
-        this.log(`\u2705 Auto-accepting ${toolCall.kind} operation: ${operation} (mode: ${permissionMode})`);
+        this.log(`\u2705 Auto-accepting ${toolCall.kind} operation: ${operation} (mode: ${permissionMode})`, 'DEBUG');
         return 'allowed';
       }
     }
 
     // Use ACP native permission dialog if available
     if (this.client.requestPermission) {
-      this.log(`Requesting ACP permission for: ${operation}`);
+      this.log(`Requesting ACP permission for: ${operation}`, 'DEBUG');
       
       try {
         // Enhanced permission options based on operation type
@@ -991,26 +1081,26 @@ export class ClaudeACPAgent implements Agent {
         const response = await this.client.requestPermission(permissionRequest);
         
         if (response.outcome.outcome === 'cancelled') {
-          this.log(`Permission request cancelled for: ${operation}`);
+          this.log(`Permission request cancelled for: ${operation}`, 'DEBUG');
           return 'cancelled';
         } else if (response.outcome.outcome === 'selected') {
           const selectedOption = response.outcome.optionId;
-          this.log(`Permission ${selectedOption} for: ${operation}`);
+          this.log(`Permission ${selectedOption} for: ${operation}`, 'DEBUG');
           
           // Enhanced permission mode updating based on user choice
           if (session) {
             if (selectedOption === 'always') {
               session.permissionMode = 'acceptEdits';
-              this.log(`\u2699\ufe0f Updated session to acceptEdits mode for future ${toolCall.kind} operations`);
+              this.log(`\u2699\ufe0f Updated session to acceptEdits mode for future ${toolCall.kind} operations`, 'DEBUG');
             } else if (selectedOption === 'session') {
               // Create a session-specific allowlist (extend AgentSession interface if needed)
               session.permissionMode = 'acceptEdits'; // For now, treat as acceptEdits
-              this.log(`\ud83d\udcdd Session permission granted for ${toolCall.kind} operations`);
+              this.log(`\ud83d\udcdd Session permission granted for ${toolCall.kind} operations`, 'DEBUG');
             }
           }
           
           const allowed = ['allow', 'always', 'session'].includes(selectedOption);
-          this.log(`Permission ${allowed ? 'GRANTED' : 'DENIED'} for: ${operation}`);
+          this.log(`Permission ${allowed ? 'GRANTED' : 'DENIED'} for: ${operation}`, 'DEBUG');
           return allowed ? 'allowed' : 'denied';
         }
       } catch (error) {
@@ -1021,12 +1111,12 @@ export class ClaudeACPAgent implements Agent {
 
     // Fallback: Check permission mode for default behavior
     if (permissionMode === 'plan') {
-      this.log(`Plan mode - denying ${operation} for review`);
+      this.log(`Plan mode - denying ${operation} for review`, 'DEBUG');
       return 'denied';
     }
 
     // Default mode - allow (matches Claude's default behavior)
-    this.log(`Default permission granted for: ${operation}`);
+    this.log(`Default permission granted for: ${operation}`, 'DEBUG');
     return 'allowed';
   }
 
@@ -1053,11 +1143,11 @@ export class ClaudeACPAgent implements Agent {
         // Validate file path
         const filePath = String(inputObj.file_path).trim();
         if (!filePath || filePath.length === 0) {
-          this.log(`Invalid file path for ACP readTextFile: "${filePath}"`);
+          this.log(`Invalid file path for ACP readTextFile: "${filePath}"`, 'DEBUG');
           return false;
         }
 
-        this.log(`Using ACP direct readTextFile for: ${filePath}`);
+        this.log(`Using ACP direct readTextFile for: ${filePath}`, 'DEBUG');
 
         // Create tool call for permission request
         const toolCall = {
@@ -1161,7 +1251,7 @@ export class ClaudeACPAgent implements Agent {
           },
         });
 
-        this.log(`ACP readTextFile completed: ${response.content.length} characters from ${filePath}`);
+        this.log(`ACP readTextFile completed: ${response.content.length} characters from ${filePath}`, 'DEBUG');
         return true;
       }
 
@@ -1172,11 +1262,11 @@ export class ClaudeACPAgent implements Agent {
         const content = String(inputObj.content);
         
         if (!filePath || filePath.length === 0) {
-          this.log(`Invalid file path for ACP writeTextFile: "${filePath}"`);
+          this.log(`Invalid file path for ACP writeTextFile: "${filePath}"`, 'DEBUG');
           return false;
         }
 
-        this.log(`Using ACP direct writeTextFile for: ${filePath} (${content.length} chars)`);
+        this.log(`Using ACP direct writeTextFile for: ${filePath} (${content.length} chars)`, 'DEBUG');
 
         // Create tool call for permission request
         const toolCall = {
@@ -1267,7 +1357,7 @@ export class ClaudeACPAgent implements Agent {
           },
         });
 
-        this.log(`ACP writeTextFile completed: ${content.length} characters to ${filePath}`);
+        this.log(`ACP writeTextFile completed: ${content.length} characters to ${filePath}`, 'DEBUG');
         return true;
       }
 
@@ -1525,7 +1615,7 @@ export class ClaudeACPAgent implements Agent {
     }
     
     if (cleanedCount > 0) {
-      this.log(`Cleaned up ${cleanedCount} orphaned agent sessions`);
+      this.log(`Cleaned up ${cleanedCount} orphaned agent sessions`, 'DEBUG');
     }
   }
 
@@ -1545,5 +1635,89 @@ export class ClaudeACPAgent implements Agent {
     const claudeSession = session.claudeSessionId ? `Claude:${session.claudeSessionId.substring(0, 8)}` : 'New';
     
     return `${status} ${claudeSession} | ${permission} | ${contextSummary}`;
+  }
+
+  /**
+   * Enhanced retry logic for operations that may fail transiently
+   */
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    context: string,
+    maxAttempts: number = this.MAX_RETRY_ATTEMPTS
+  ): Promise<T> {
+    let lastError: Error;
+    
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const result = await operation();
+        if (attempt > 1) {
+          this.log(`Operation succeeded on attempt ${attempt}`, 'INFO', { context, attempt });
+        }
+        return result;
+      } catch (error) {
+        lastError = error as Error;
+        
+        this.log(`Operation failed on attempt ${attempt}/${maxAttempts}`, 'WARN', {
+          context,
+          attempt,
+          error: lastError.message
+        });
+        
+        // Don't retry on final attempt or for certain error types
+        if (attempt === maxAttempts || this.isNonRetryableError(lastError)) {
+          break;
+        }
+        
+        // Exponential backoff with jitter
+        const delay = this.RETRY_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    throw lastError!;
+  }
+
+  /**
+   * Determine if an error should not be retried
+   */
+  private isNonRetryableError(error: Error): boolean {
+    const nonRetryablePatterns = [
+      /authentication/i,
+      /permission denied/i,
+      /invalid.*request/i,
+      /malformed/i,
+      /syntax error/i
+    ];
+    
+    return nonRetryablePatterns.some(pattern => pattern.test(error.message));
+  }
+
+  /**
+   * Enhanced error reporting with categorization
+   */
+  private categorizeError(error: Error): {
+    category: 'network' | 'auth' | 'validation' | 'resource' | 'unknown';
+    severity: 'low' | 'medium' | 'high' | 'critical';
+    recoverable: boolean;
+  } {
+    const message = error.message.toLowerCase();
+    
+    if (message.includes('network') || message.includes('timeout') || message.includes('connection')) {
+      return { category: 'network', severity: 'medium', recoverable: true };
+    }
+    
+    if (message.includes('auth') || message.includes('permission') || message.includes('unauthorized')) {
+      return { category: 'auth', severity: 'high', recoverable: false };
+    }
+    
+    if (message.includes('invalid') || message.includes('malformed') || message.includes('syntax')) {
+      return { category: 'validation', severity: 'medium', recoverable: false };
+    }
+    
+    if (message.includes('memory') || message.includes('limit') || message.includes('quota')) {
+      return { category: 'resource', severity: 'high', recoverable: true };
+    }
+    
+    return { category: 'unknown', severity: 'medium', recoverable: true };
   }
 }

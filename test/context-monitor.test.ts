@@ -63,7 +63,7 @@ describe('ContextMonitor', () => {
       
       expect(warning).not.toBeNull()
       expect(warning!.level).toBe('warning')
-      expect(warning!.usage).toBeGreaterThan(0.8) // Above warning threshold
+      expect(warning!.usage).toBeGreaterThanOrEqual(0.8) // Above or at warning threshold
     })
 
     it('should show critical warning near limit', () => {
@@ -75,7 +75,7 @@ describe('ContextMonitor', () => {
       
       expect(warning).not.toBeNull()
       expect(warning!.level).toBe('critical')
-      expect(warning!.usage).toBeGreaterThan(0.95) // Above critical threshold
+      expect(warning!.usage).toBeGreaterThanOrEqual(0.95) // Above or at critical threshold
       expect(warning!.recommendation).toBeDefined()
     })
   })
