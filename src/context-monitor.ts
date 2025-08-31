@@ -35,25 +35,50 @@ export class ContextMonitor {
   private estimateTokens(text: string): number {
     if (!text) return 0;
     
-    // More accurate estimation accounting for:
-    // - Word boundaries (tokens often align with words)  
-    // - Punctuation and special characters
-    // - Code vs natural language differences
-    
+    // Enhanced token estimation with better accuracy
     const chars = text.length;
-    const words = text.split(/\s+/).length;
-    const codeBlocks = (text.match(/```[\s\S]*?```/g) || []).length;
+    const words = text.split(/\s+/).filter(w => w.length > 0).length;
+    const lines = text.split('\n').length;
     
-    // Base estimation: ~4 chars per token
+    // Detect different content types for better estimation
+    const codeBlocks = (text.match(/```[\s\S]*?```/g) || []).length;
+    const jsonBlocks = (text.match(/\{[\s\S]*?\}/g) || []).length;
+    const markdownHeaders = (text.match(/^#+\s/gm) || []).length;
+    const urls = (text.match(/https?:\/\/[^\s]+/g) || []).length;
+    
+    // Base estimation: ~4 chars per token for natural language
     let tokenEstimate = chars / 4;
     
     // Adjust for word boundaries - tokens often align with words
     tokenEstimate = Math.max(tokenEstimate, words * 0.75);
     
-    // Code tends to have more tokens per character
+    // Content-specific adjustments
     if (codeBlocks > 0) {
-      tokenEstimate *= 1.2;
+      tokenEstimate *= 1.3; // Code is more token-dense
     }
+    
+    if (jsonBlocks > 3) {
+      tokenEstimate *= 1.2; // JSON/structured data
+    }
+    
+    if (urls > 0) {
+      tokenEstimate += urls * 2; // URLs are typically multiple tokens
+    }
+    
+    if (markdownHeaders > 0) {
+      tokenEstimate += markdownHeaders * 1.5; // Headers add formatting tokens
+    }
+    
+    // Line-based adjustment for very long or short lines
+    if (lines > 10) {
+      const avgLineLength = chars / lines;
+      if (avgLineLength > 100) {
+        tokenEstimate *= 1.1; // Long lines tend to be more token-dense
+      }
+    }
+    
+    // Add small buffer for safety
+    tokenEstimate *= 1.05;
     
     return Math.ceil(tokenEstimate);
   }
@@ -152,30 +177,79 @@ export class ContextMonitor {
     const tokensK = (stats.estimatedTokens / 1000).toFixed(1);
     const maxK = (stats.maxTokens / 1000).toFixed(0);
     
-    let status = '✅';
-    if (stats.usage >= this.CRITICAL_THRESHOLD) status = '🚨';
-    else if (stats.usage >= this.WARNING_THRESHOLD) status = '⚠️';
-    else if (stats.usage >= 0.5) status = '📊';
+    // Enhanced status indicators
+    let status = '\u2705'; // Default: good
+    let indicator = '';
     
-    return `${status} Context: ${tokensK}K/${maxK}K tokens (${usagePercent}%), ${stats.turnCount} turns`;
+    if (stats.usage >= this.CRITICAL_THRESHOLD) {
+      status = '\ud83d\udea8';
+      indicator = ' CRITICAL';
+    } else if (stats.usage >= this.WARNING_THRESHOLD) {
+      status = '\u26a0\ufe0f';
+      indicator = ' HIGH';
+    } else if (stats.usage >= 0.5) {
+      status = '\ud83d\udcc8';
+      indicator = ' MODERATE';
+    }
+    
+    // Include time since last activity for idle sessions
+    const timeSinceUpdate = Date.now() - stats.lastUpdate.getTime();
+    const minutesAgo = Math.floor(timeSinceUpdate / (1000 * 60));
+    const timeInfo = minutesAgo > 5 ? ` (${minutesAgo}m ago)` : '';
+    
+    return `${status} ${tokensK}K/${maxK}K (${usagePercent}%)${indicator}, ${stats.turnCount} turns${timeInfo}`;
   }
 
-  // Cleanup old sessions to prevent memory leaks
+  // Enhanced cleanup with better memory management and reporting
   cleanupOldSessions(maxAge: number = 24 * 60 * 60 * 1000): number {
     const now = Date.now();
     let cleaned = 0;
+    let totalMemoryFreed = 0;
     
     for (const [sessionId, stats] of this.sessions.entries()) {
       if (now - stats.lastUpdate.getTime() > maxAge) {
+        totalMemoryFreed += stats.estimatedTokens;
         this.sessions.delete(sessionId);
         cleaned++;
+        this.log(`Cleaned session ${sessionId}: ${stats.estimatedTokens} tokens, ${stats.messages} messages`);
       }
     }
     
     if (cleaned > 0) {
-      this.log(`Cleaned up ${cleaned} old sessions`);
+      this.log(`\u267e\ufe0f Cleaned up ${cleaned} old sessions, freed ~${totalMemoryFreed} tokens of memory`);
     }
     
     return cleaned;
+  }
+
+  // Get memory usage statistics
+  getMemoryStats(): { 
+    activeSessions: number;
+    totalTokens: number;
+    totalMessages: number;
+    averageTokensPerSession: number;
+    oldestSession?: string;
+  } {
+    const sessions = Array.from(this.sessions.entries());
+    const totalTokens = sessions.reduce((sum, [, stats]) => sum + stats.estimatedTokens, 0);
+    const totalMessages = sessions.reduce((sum, [, stats]) => sum + stats.messages, 0);
+    
+    let oldestSession: string | undefined;
+    let oldestTime = Date.now();
+    
+    for (const [sessionId, stats] of sessions) {
+      if (stats.lastUpdate.getTime() < oldestTime) {
+        oldestTime = stats.lastUpdate.getTime();
+        oldestSession = sessionId;
+      }
+    }
+    
+    return {
+      activeSessions: sessions.length,
+      totalTokens,
+      totalMessages,
+      averageTokensPerSession: sessions.length > 0 ? Math.round(totalTokens / sessions.length) : 0,
+      oldestSession
+    };
   }
 }

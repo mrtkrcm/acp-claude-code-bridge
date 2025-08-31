@@ -55,9 +55,13 @@ export class DiagnosticSystem {
       pathOverride,
       process.env.ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE,
       '/usr/local/bin/claude',
-      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', 
       '/opt/homebrew/bin/claude',
       '~/.local/bin/claude',
+      // Additional common installation paths
+      '~/.npm-global/bin/claude',
+      '/usr/bin/claude',
+      process.env.HOME ? `${process.env.HOME}/.local/share/pnpm/global/5/node_modules/.bin/claude` : null,
     ].filter(Boolean) as string[];
 
     for (const candidate of candidates) {
@@ -74,9 +78,13 @@ export class DiagnosticSystem {
       }
     }
 
-    // Try 'claude' in PATH
+    // Try 'claude' in PATH with enhanced detection
     return new Promise((resolve) => {
-      const child = spawn('which', ['claude'], { stdio: 'pipe' });
+      const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+      const child = spawn(whichCmd, ['claude'], { 
+        stdio: 'pipe',
+        timeout: 5000  // 5 second timeout
+      });
       let output = '';
       
       child.stdout?.on('data', (data) => {
@@ -85,13 +93,17 @@ export class DiagnosticSystem {
       
       child.on('close', (code) => {
         if (code === 0 && output.trim()) {
-          resolve(output.trim());
+          const path = output.trim().split('\n')[0]; // First result on Windows 'where'
+          resolve(path);
         } else {
           resolve(null);
         }
       });
       
-      child.on('error', () => resolve(null));
+      child.on('error', (err) => {
+        console.warn(`Path detection failed: ${err.message}`);
+        resolve(null);
+      });
     });
   }
 
@@ -154,15 +166,37 @@ export class DiagnosticSystem {
       });
     }
 
-    // Node.js version check
-    const nodeVersion = parseInt(platform.nodeVersion.slice(1), 10);
-    if (nodeVersion < 18) {
+    // Enhanced Node.js version check
+    const nodeVersionMatch = platform.nodeVersion.match(/^v(\d+)\.(\d+)\.(\d+)/);
+    if (nodeVersionMatch) {
+      const [, major, minor] = nodeVersionMatch;
+      const majorVersion = parseInt(major, 10);
+      const minorVersion = parseInt(minor, 10);
+      
+      if (majorVersion < 18) {
+        issues.push({
+          level: 'error',
+          category: 'platform',
+          code: 'NODE_VERSION_OLD',
+          message: `Node.js ${platform.nodeVersion} is too old (minimum: 18.0.0)`,
+          solution: 'Upgrade to Node.js 18 or later using nvm, n, or download from nodejs.org'
+        });
+      } else if (majorVersion === 18 && minorVersion < 12) {
+        issues.push({
+          level: 'warning',
+          category: 'platform',
+          code: 'NODE_VERSION_OUTDATED',
+          message: `Node.js ${platform.nodeVersion} is outdated (recommended: 18.12+)`,
+          solution: 'Consider upgrading to a more recent Node.js LTS version'
+        });
+      }
+    } else {
       issues.push({
-        level: 'error',
+        level: 'warning',
         category: 'platform',
-        code: 'NODE_VERSION',
-        message: `Node.js ${platform.nodeVersion} is too old`,
-        solution: 'Upgrade to Node.js 18 or later.'
+        code: 'NODE_VERSION_UNKNOWN',
+        message: `Cannot parse Node.js version: ${platform.nodeVersion}`,
+        solution: 'Verify Node.js installation'
       });
     }
 
@@ -218,24 +252,48 @@ export class DiagnosticSystem {
       });
     }
 
-    if (pathOverride && !existsSync(pathOverride)) {
-      issues.push({
-        level: 'error',
-        category: 'configuration',
-        code: 'CUSTOM_PATH_INVALID',
-        message: `Custom Claude Code path does not exist: ${pathOverride}`,
-        solution: 'Check the ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE environment variable.'
-      });
+    // Enhanced path validation
+    if (pathOverride) {
+      if (!existsSync(pathOverride)) {
+        issues.push({
+          level: 'error',
+          category: 'configuration',
+          code: 'CUSTOM_PATH_NOT_FOUND',
+          message: `Custom Claude Code path does not exist: ${pathOverride}`,
+          solution: 'Verify the ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE path is correct and accessible.'
+        });
+      } else {
+        // Check if path is executable
+        try {
+          await access(pathOverride, constants.X_OK);
+        } catch {
+          issues.push({
+            level: 'error',
+            category: 'configuration',
+            code: 'CUSTOM_PATH_NOT_EXECUTABLE',
+            message: `Custom Claude Code path is not executable: ${pathOverride}`,
+            solution: 'Make the file executable with: chmod +x <path>'
+          });
+        }
+      }
     }
 
-    // Calculate compatibility score
+    // Enhanced compatibility scoring
     const errorCount = issues.filter(i => i.level === 'error').length;
     const warningCount = issues.filter(i => i.level === 'warning').length;
+    const infoCount = issues.filter(i => i.level === 'info').length;
     
     let score = 100;
     score -= errorCount * 30; // Errors are serious
-    score -= warningCount * 10; // Warnings are less serious
-    score = Math.max(0, score);
+    score -= warningCount * 10; // Warnings are less serious  
+    score -= infoCount * 2; // Info items are minor
+    
+    // Bonus points for good configurations
+    if (claudeAvailable && claudeAuthenticated) score += 5;
+    if (platform.hasTTY) score += 2;
+    if (permissionMode !== 'default') score += 3; // Explicit permission mode is good
+    
+    score = Math.max(0, Math.min(100, score)); // Clamp between 0-100
 
     const compatible = errorCount === 0;
 

@@ -4,67 +4,97 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an ACP (Agent Client Protocol) bridge that enables Claude Code to work with Zed editor and other ACP-compatible clients. It wraps the Claude Code SDK to provide ACP protocol compatibility.
+This is an ACP (Agent Client Protocol) bridge that enables Claude Code to work with Zed editor and other ACP-compatible clients. It wraps the Claude Code SDK to provide ACP protocol compatibility with production-ready features including session persistence, context monitoring, and comprehensive error handling.
 
-## Common Development Tasks
-
-### Build and Development Commands
+## Build and Development Commands
 
 - `pnpm run build` - Build the TypeScript project to dist/
 - `pnpm run dev` - Run in development mode with hot reload using tsx
 - `pnpm run typecheck` - Run TypeScript type checking without emitting files
 - `pnpm run lint` - Run ESLint on the src/ directory
 - `pnpm run start` - Run the built application from dist/
+- `pnpm run diagnose` - Run diagnostics to check system compatibility
 
-### Testing the ACP Agent
+### Environment Variables for Development
 
-- Run directly: `node dist/index.js` (after building)
-- Run in development: `pnpm run dev`
-- Debug mode: Set `ACP_DEBUG=true` environment variable for verbose logging
+- `ACP_DEBUG=true` - Enable verbose debug logging
+- `ACP_LOG_FILE=/path/to/log` - Log to file for persistent debugging
+- `ACP_MAX_TURNS=0` - Set unlimited turns (default: 100)
+- `ACP_PERMISSION_MODE=acceptEdits` - Auto-accept file edits for development
 
 ## Architecture
 
-The project implements the Agent Client Protocol with three main components:
+The bridge implements the Agent Client Protocol with these core components:
 
-1. **Agent (src/agent.ts)** - Core ClaudeACPAgent class that:
-   - Manages sessions with 1:1 mapping between ACP and Claude sessions
-   - Handles streaming responses from Claude Code SDK
-   - Converts between ACP and Claude message formats
-   - Maps tool calls to appropriate ACP tool kinds
+### 1. Agent (src/agent.ts) - Core Logic
+The `ClaudeACPAgent` class orchestrates all bridge functionality:
+- **Session Management**: Maps ACP session IDs to Claude sessions with persistent resume capability
+- **Message Processing**: Converts between ACP and Claude SDK message formats in `handleClaudeMessage()`
+- **Tool Integration**: Maps Claude tools to ACP kinds (read/edit/delete/move/search/execute/think/fetch/other)
+- **Permission System**: Supports multiple permission modes (default/acceptEdits/bypassPermissions/plan)
+- **Context Monitoring**: Tracks 200k context window usage with warnings
 
-2. **Server (src/index.ts)** - Entry point that:
-   - Initializes the ACP server using stdio transport
-   - Sets up the ClaudeACPAgent with the ACP client
+### 2. Context Monitor (src/context-monitor.ts) - Resource Management
+Prevents context overflow with smart monitoring:
+- Token estimation based on character/word analysis
+- Automatic warnings at 80% and critical alerts at 95%
+- Per-session tracking with cleanup
 
-3. **Types (src/types.ts)** - TypeScript interfaces for Claude SDK messages
+### 3. Diagnostics (src/diagnostics.ts) - System Health
+Comprehensive platform and configuration validation:
+- Claude Code executable detection and version checking
+- Authentication status verification
+- Platform compatibility analysis (TTY, Windows, Node.js version)
+- Configuration validation with actionable error messages
+
+### 4. Entry Points
+- **src/index.ts** - Main server initialization with stdio transport
+- **src/cli.ts** - Command-line interface with diagnostics support
 
 ## Key Implementation Details
 
-### Session Management
+### Session Management Architecture
+The bridge uses a hybrid session approach:
+- ACP sessions created with random IDs stored in Map
+- Claude sessions obtained after first message via SDK
+- Resume functionality maintains conversation context across restarts
+- Each session tracks: `pendingPrompt`, `abortController`, `claudeSessionId`, `permissionMode`
 
-- Sessions are stored in a Map with random IDs
-- Each session tracks `pendingPrompt` and `abortController`
-- Cancellation is handled via AbortController
+### Message Flow Pipeline
+1. **ACP Client → Agent**: JSON-RPC messages over stdio
+2. **Agent → Claude SDK**: Converted to SDK format with session resume
+3. **Claude SDK → Agent**: Streaming SDKMessage responses
+4. **Agent → ACP Client**: Converted to ACP SessionNotification updates
 
-### Message Processing
+### Permission System
+Dynamic permission handling supports:
+- Runtime mode switching via prompt markers: `[ACP:PERMISSION:ACCEPT_EDITS]`
+- Per-session permission overrides
+- Client capability detection for direct file operations
+- Graceful fallback when permissions denied
 
-- Claude SDK messages are processed in `handleClaudeMessage()`
-- Tool calls are mapped to ACP tool kinds (read, edit, delete, move, search, execute, think, fetch, other)
-- Streaming text is sent as agent_message_chunk updates
+### Error Handling Strategy
+- Configuration validation on startup with clear error messages
+- Graceful degradation when Claude Code unavailable
+- Context overflow prevention with user warnings
+- Session cleanup and resource management
 
-### Authentication
+## Authentication Requirements
 
-- Uses Claude Code's built-in authentication from ~/.claude/config.json
-- Users should authenticate via `claude setup-token` before using
+Authentication is handled by Claude Code SDK:
+```bash
+claude setup-token  # Required before first use
+```
+The bridge automatically uses credentials from `~/.claude/config.json`.
 
 ## Package Management
 
-- Use `pnpm` for all package management operations
-- Install packages with exact versions (no ^ or ~ prefixes)
+- Use `pnpm` for all operations
+- Dependencies use exact versions (no ^ or ~ prefixes)
+- ESM module format with Node.js 18+ requirement
 
-## Important Files
+## Core Configuration Files
 
-- **package.json** - Project configuration and scripts
-- **tsconfig.json** - TypeScript compiler configuration
-- **.eslintrc.json** - ESLint rules configuration
-- **dist/** - Compiled JavaScript output (gitignored)
+- **package.json** - Project config with ESM and executable setup
+- **tsconfig.json** - TypeScript with ES2022 target and strict mode
+- **eslint.config.mjs** - Modern ESLint flat config with TypeScript rules

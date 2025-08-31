@@ -68,9 +68,15 @@ export class ClaudeACPAgent implements Agent {
     
     this.log(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`);
     
-    // Cleanup old sessions periodically (every hour)
+    // Enhanced session cleanup with logging
     setInterval(() => {
-      this.contextMonitor.cleanupOldSessions();
+      const cleanedCount = this.contextMonitor.cleanupOldSessions();
+      if (cleanedCount > 0) {
+        this.log(`Cleaned up ${cleanedCount} old context sessions`);
+      }
+      
+      // Also cleanup orphaned agent sessions
+      this.cleanupOrphanedSessions();
     }, 60 * 60 * 1000);
   }
 
@@ -204,6 +210,7 @@ export class ClaudeACPAgent implements Agent {
       this.log(
         `Session ${currentSessionId} not found in map. Available sessions: ${Array.from(this.sessions.keys()).join(", ")}`,
       );
+      this.log(`Available context sessions: ${Array.from(this.contextMonitor.getAllStats().keys()).join(", ")}`);
       throw new Error(`Session ${currentSessionId} not found`);
     }
 
@@ -241,7 +248,7 @@ export class ClaudeACPAgent implements Agent {
       if (contextWarning) {
         this.log(`Context warning: ${contextWarning.message}`);
         
-        // Send context status as a subtle message to user
+        // Send context status as a subtle message to user with enhanced formatting
         if (contextWarning.level === 'critical') {
           await this.client.sessionUpdate({
             sessionId: currentSessionId,
@@ -249,7 +256,19 @@ export class ClaudeACPAgent implements Agent {
               sessionUpdate: "agent_message_chunk",
               content: {
                 type: "text",
-                text: `⚠️ ${contextWarning.message}\n${contextWarning.recommendation || ''}\n\n`,
+                text: `🚨 **Context Alert**: ${contextWarning.message}\n💡 ${contextWarning.recommendation || 'Consider starting a new session.'}\n\n`,
+              },
+            },
+          });
+        } else if (contextWarning.level === 'warning') {
+          // Show warning level notifications too, but less prominently
+          await this.client.sessionUpdate({
+            sessionId: currentSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: {
+                type: "text",
+                text: `⚠️ ${contextWarning.message}\n`,
               },
             },
           });
@@ -404,19 +423,28 @@ export class ClaudeACPAgent implements Agent {
       };
     } catch (error) {
       this.log("Error during prompt processing:", error);
+      
+      // Enhanced error logging with context
+      const contextStats = this.contextMonitor.getStats(currentSessionId);
+      if (contextStats) {
+        this.log(`Error occurred at context usage: ${(contextStats.usage * 100).toFixed(1)}%`);
+      }
 
       if (session.abortController?.signal.aborted) {
         return { stopReason: "cancelled" };
       }
 
-      // Send error to client
+      // Send enhanced error information to client
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const contextInfo = contextStats ? ` (Context: ${(contextStats.usage * 100).toFixed(1)}%)` : '';
+      
       await this.client.sessionUpdate({
         sessionId: params.sessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
           content: {
             type: "text",
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            text: `❌ **Error**: ${errorMessage}${contextInfo}\n\n*If this persists, try starting a new session.*`,
           },
         },
       });
@@ -499,8 +527,12 @@ export class ClaudeACPAgent implements Agent {
             if (content.type === "text") {
               const text = content.text || "";
               
-              // Track context usage for assistant message
-              this.contextMonitor.trackMessage(sessionId, text, 'assistant');
+              // Track context usage for assistant message with enhanced monitoring
+              const assistantContextWarning = this.contextMonitor.trackMessage(sessionId, text, 'assistant');
+              if (assistantContextWarning && assistantContextWarning.level === 'critical') {
+                this.log(`Critical context usage detected: ${assistantContextWarning.message}`);
+                // Could notify user here if needed, but avoid interrupting the flow
+              }
               
               // Send text content without adding extra newlines
               // Claude already formats the text properly
@@ -870,8 +902,7 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
-   * Requests user permission through ACP's official permission system.
-   * Provides better UX than Claude's built-in permission prompts.
+   * Enhanced permission system with better context awareness and fallback handling
    */
   private async requestUserPermission(
     sessionId: string,
@@ -891,18 +922,27 @@ export class ClaudeACPAgent implements Agent {
     },
     _description?: string
   ): Promise<'allowed' | 'denied' | 'cancelled'> {
-    // Check permission mode - bypass if configured
+    // Enhanced permission mode handling with better logging and context
     const session = this.sessions.get(sessionId);
     const permissionMode = session?.permissionMode || this.defaultPermissionMode;
+    const contextStats = this.contextMonitor.getStats(sessionId);
+    
+    this.log(`Permission check for '${operation}' - Mode: ${permissionMode}, Context: ${contextStats ? (contextStats.usage * 100).toFixed(1) + '%' : 'N/A'}`);
 
     if (permissionMode === 'bypassPermissions') {
-      this.log(`Bypassing permission request for ${operation} (mode: ${permissionMode})`);
+      this.log(`\u2705 Bypassing permission request for ${operation} (mode: ${permissionMode})`);
       return 'allowed';
     }
 
     if (permissionMode === 'acceptEdits') {
-      this.log(`Auto-accepting permission for ${operation} (mode: ${permissionMode})`);
-      return 'allowed';
+      // More granular control for acceptEdits mode
+      if (toolCall.kind === 'execute' || operation.toLowerCase().includes('bash')) {
+        this.log(`\u26a0\ufe0f Execute operation requires explicit permission even in acceptEdits mode`);
+        // Continue to permission dialog
+      } else {
+        this.log(`\u2705 Auto-accepting ${toolCall.kind} operation: ${operation} (mode: ${permissionMode})`);
+        return 'allowed';
+      }
     }
 
     // Use ACP native permission dialog if available
@@ -910,23 +950,37 @@ export class ClaudeACPAgent implements Agent {
       this.log(`Requesting ACP permission for: ${operation}`);
       
       try {
+        // Enhanced permission options based on operation type
         const options: PermissionOption[] = [
           {
             optionId: 'allow',
-            name: 'Allow',
+            name: 'Allow Once',
             kind: 'allow_once' as const,
           },
           {
             optionId: 'deny',
             name: 'Deny',
             kind: 'reject_once' as const,
-          },
-          {
-            optionId: 'always',
-            name: 'Always Allow',
-            kind: 'allow_always' as const,
-          },
+          }
         ];
+        
+        // Add "Always Allow" option for safe operations
+        if (toolCall.kind !== 'execute' && !operation.toLowerCase().includes('bash')) {
+          options.push({
+            optionId: 'always',
+            name: `Always Allow ${toolCall.kind}`,
+            kind: 'allow_always' as const,
+          });
+        }
+        
+        // Add session-specific options for power users
+        if (toolCall.kind === 'edit' || toolCall.kind === 'read') {
+          options.push({
+            optionId: 'session',
+            name: 'Allow for Session',
+            kind: 'allow_always' as const, // Treated as always for this session
+          });
+        }
 
         const permissionRequest: RequestPermissionRequest = {
           sessionId,
@@ -943,13 +997,21 @@ export class ClaudeACPAgent implements Agent {
           const selectedOption = response.outcome.optionId;
           this.log(`Permission ${selectedOption} for: ${operation}`);
           
-          // Handle "always allow" by updating session permission mode
-          if (selectedOption === 'always' && session) {
-            session.permissionMode = 'acceptEdits';
-            this.log(`Updated session permission mode to acceptEdits for future operations`);
+          // Enhanced permission mode updating based on user choice
+          if (session) {
+            if (selectedOption === 'always') {
+              session.permissionMode = 'acceptEdits';
+              this.log(`\u2699\ufe0f Updated session to acceptEdits mode for future ${toolCall.kind} operations`);
+            } else if (selectedOption === 'session') {
+              // Create a session-specific allowlist (extend AgentSession interface if needed)
+              session.permissionMode = 'acceptEdits'; // For now, treat as acceptEdits
+              this.log(`\ud83d\udcdd Session permission granted for ${toolCall.kind} operations`);
+            }
           }
           
-          return selectedOption === 'allow' || selectedOption === 'always' ? 'allowed' : 'denied';
+          const allowed = ['allow', 'always', 'session'].includes(selectedOption);
+          this.log(`Permission ${allowed ? 'GRANTED' : 'DENIED'} for: ${operation}`);
+          return allowed ? 'allowed' : 'denied';
         }
       } catch (error) {
         this.log(`ACP permission request failed: ${error}`, 'ERROR');
@@ -1440,5 +1502,48 @@ export class ClaudeACPAgent implements Agent {
     } else {
       return "other";
     }
+  }
+
+  /**
+   * Cleanup orphaned agent sessions that no longer have context data
+   */
+  private cleanupOrphanedSessions(): void {
+    const activeContextSessions = new Set(this.contextMonitor.getAllStats().keys());
+    let cleanedCount = 0;
+    
+    for (const [sessionId, session] of this.sessions.entries()) {
+      // Skip active sessions that still have pending operations
+      if (session.pendingPrompt || session.abortController) {
+        continue;
+      }
+      
+      // Remove sessions that have no context data and no Claude session
+      if (!activeContextSessions.has(sessionId) && !session.claudeSessionId) {
+        this.sessions.delete(sessionId);
+        cleanedCount++;
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      this.log(`Cleaned up ${cleanedCount} orphaned agent sessions`);
+    }
+  }
+
+  /**
+   * Get comprehensive session summary including context and permission info
+   */
+  getSessionSummary(sessionId: string): string {
+    const session = this.sessions.get(sessionId);
+    const contextSummary = this.contextMonitor.getSessionSummary(sessionId);
+    
+    if (!session) {
+      return `Session ${sessionId}: Not found`;
+    }
+    
+    const status = session.pendingPrompt ? '🔄 Active' : '💤 Idle';
+    const permission = session.permissionMode || this.defaultPermissionMode;
+    const claudeSession = session.claudeSessionId ? `Claude:${session.claudeSessionId.substring(0, 8)}` : 'New';
+    
+    return `${status} ${claudeSession} | ${permission} | ${contextSummary}`;
   }
 }
