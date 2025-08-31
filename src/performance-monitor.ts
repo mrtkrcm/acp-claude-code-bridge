@@ -196,45 +196,26 @@ export class PerformanceMonitor {
   }
 
   /**
-   * Get performance statistics for operations
+   * Get basic operation statistics
    */
   public getOperationStats(operation: string): {
     count: number;
     averageDuration: number;
-    minDuration: number;
-    maxDuration: number;
     successRate: number;
-    p95Duration: number;
-    p99Duration: number;
   } {
     const metrics = this.getOperationMetrics(operation);
     
     if (metrics.length === 0) {
-      return {
-        count: 0,
-        averageDuration: 0,
-        minDuration: 0,
-        maxDuration: 0,
-        successRate: 100,
-        p95Duration: 0,
-        p99Duration: 0
-      };
+      return { count: 0, averageDuration: 0, successRate: 100 };
     }
 
-    const durations = metrics.map(m => m.duration).sort((a, b) => a - b);
+    const durations = metrics.map(m => m.duration);
     const successCount = metrics.filter(m => m.success).length;
-    
-    const p95Index = Math.floor(durations.length * 0.95);
-    const p99Index = Math.floor(durations.length * 0.99);
 
     return {
       count: metrics.length,
       averageDuration: durations.reduce((sum, d) => sum + d, 0) / durations.length,
-      minDuration: durations[0],
-      maxDuration: durations[durations.length - 1],
-      successRate: (successCount / metrics.length) * 100,
-      p95Duration: durations[p95Index] || 0,
-      p99Duration: durations[p99Index] || 0
+      successRate: (successCount / metrics.length) * 100
     };
   }
 
@@ -250,97 +231,45 @@ export class PerformanceMonitor {
   }
 
   /**
-   * Get health check information
+   * Get basic health status
    */
-  public getHealthCheck(): {
-    status: 'healthy' | 'warning' | 'critical';
-    checks: Array<{ name: string; status: 'pass' | 'fail'; message: string; }>;
-  } {
-    const checks: Array<{ name: string; status: 'pass' | 'fail'; message: string; }> = [];
-    let overallStatus: 'healthy' | 'warning' | 'critical' = 'healthy';
-
-    // Memory usage check
+  public getHealthStatus(): 'healthy' | 'warning' | 'critical' {
     const memory = process.memoryUsage();
     const memoryUsageMB = memory.heapUsed / 1024 / 1024;
-    if (memoryUsageMB > 1000) { // > 1GB
-      checks.push({ name: 'memory', status: 'fail', message: `High memory usage: ${memoryUsageMB.toFixed(2)}MB` });
-      overallStatus = 'critical';
-    } else if (memoryUsageMB > 500) { // > 500MB
-      checks.push({ name: 'memory', status: 'pass', message: `Elevated memory usage: ${memoryUsageMB.toFixed(2)}MB` });
-      if (overallStatus === 'healthy') overallStatus = 'warning';
-    } else {
-      checks.push({ name: 'memory', status: 'pass', message: `Memory usage: ${memoryUsageMB.toFixed(2)}MB` });
-    }
-
-    // Error rate check
     const errorRate = this.totalOperations > 0 ? (this.totalErrors / this.totalOperations) * 100 : 0;
-    if (errorRate > 10) { // > 10% errors
-      checks.push({ name: 'errorRate', status: 'fail', message: `High error rate: ${errorRate.toFixed(2)}%` });
-      overallStatus = 'critical';
-    } else if (errorRate > 5) { // > 5% errors
-      checks.push({ name: 'errorRate', status: 'pass', message: `Elevated error rate: ${errorRate.toFixed(2)}%` });
-      if (overallStatus === 'healthy') overallStatus = 'warning';
-    } else {
-      checks.push({ name: 'errorRate', status: 'pass', message: `Error rate: ${errorRate.toFixed(2)}%` });
-    }
-
-    // Active operations check
     const activeOps = this.activeOperations.size;
-    if (activeOps > 50) { // > 50 concurrent operations
-      checks.push({ name: 'activeOperations', status: 'fail', message: `Too many active operations: ${activeOps}` });
-      overallStatus = 'critical';
-    } else if (activeOps > 20) { // > 20 concurrent operations
-      checks.push({ name: 'activeOperations', status: 'pass', message: `High active operations: ${activeOps}` });
-      if (overallStatus === 'healthy') overallStatus = 'warning';
-    } else {
-      checks.push({ name: 'activeOperations', status: 'pass', message: `Active operations: ${activeOps}` });
-    }
 
-    return { status: overallStatus, checks };
+    if (memoryUsageMB > 1000 || errorRate > 10 || activeOps > 50) return 'critical';
+    if (memoryUsageMB > 500 || errorRate > 5 || activeOps > 20) return 'warning';
+    return 'healthy';
   }
 
   private startPeriodicReporting(): void {
-    // Report system metrics every 5 minutes AND cleanup old metrics
+    // Simple periodic cleanup every 5 minutes
     setInterval(() => {
-      // Cleanup old metrics first to prevent memory bloat
       this.cleanupOldMetrics();
       
-      const metrics = this.getSystemMetrics();
-      const health = this.getHealthCheck();
-      
-      // Only log if debug mode or issues detected
-      if (process.env.ACP_DEBUG === 'true' || health.status !== 'healthy') {
-        this.logger.info('System metrics report', {
-          uptime: `${(metrics.uptime / 1000 / 60).toFixed(2)} minutes`,
-          memoryUsage: `${(metrics.memoryUsage.heapUsed / 1024 / 1024).toFixed(2)}MB`,
-          activeOperations: metrics.activeOperations,
+      if (process.env.ACP_DEBUG === 'true') {
+        const metrics = this.getSystemMetrics();
+        this.logger.info('Performance metrics', {
           totalOperations: metrics.totalOperations,
-          averageResponseTime: `${metrics.averageResponseTime.toFixed(2)}ms`,
           errorRate: `${metrics.errorRate.toFixed(2)}%`,
-          healthStatus: health.status,
-          metricsCount: this.metrics.length
+          memoryMB: Math.round(metrics.memoryUsage.heapUsed / 1024 / 1024)
         });
       }
-      
-      if (health.status !== 'healthy') {
-        this.logger.warn('Health check issues detected', { checks: health.checks });
-      }
-    }, 5 * 60 * 1000); // 5 minutes
+    }, 5 * 60 * 1000);
   }
 
   private cleanupOldMetrics(): void {
-    // Keep only last 500 metrics instead of 1000 for better memory efficiency
-    const targetSize = 500;
-    if (this.metrics.length > targetSize) {
-      const removeCount = this.metrics.length - targetSize;
-      this.metrics.splice(0, removeCount);
+    // Keep only last 100 metrics for memory efficiency
+    if (this.metrics.length > 100) {
+      this.metrics.splice(0, this.metrics.length - 100);
     }
     
-    // Also cleanup very old active operations (stuck operations)
-    const staleThreshold = Date.now() - (10 * 60 * 1000); // 10 minutes
+    // Cleanup stale operations (> 10 minutes)
+    const staleThreshold = Date.now() - (10 * 60 * 1000);
     for (const [operationId, operation] of this.activeOperations.entries()) {
       if (operation.start < staleThreshold) {
-        this.logger.warn(`Removing stale operation: ${operation.operation}`, { operationId });
         this.activeOperations.delete(operationId);
       }
     }

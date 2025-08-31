@@ -66,40 +66,20 @@ export class ProtocolError extends ACPError {
 export class ACPErrorHandler {
   private readonly logger: Logger;
   private errorCount = 0;
-  private readonly errorHistory: Array<{ error: ACPError; timestamp: Date }> = [];
-  private readonly MAX_ERROR_HISTORY = 100;
 
   constructor() {
     this.logger = createLogger('ErrorHandler');
-    
-    // Increase max listeners to prevent warnings in test environments
-    const currentMaxListeners = process.getMaxListeners();
-    if (currentMaxListeners < 25) {
-      process.setMaxListeners(25);
-    }
-    
     this.setupUnhandledRejectionHandler();
     this.setupUncaughtExceptionHandler();
   }
 
   /**
-   * Handle errors in a centralized way with proper logging and user-friendly messages
+   * Handle errors with logging
    */
   public handleError(error: Error | ACPError, context: ErrorContext = {}): ACPError {
     this.errorCount++;
-
-    // Convert regular errors to ACPError
     const acpError = error instanceof ACPError ? error : this.wrapError(error, context);
-
-    // Log the error with full context
     this.logError(acpError);
-
-    // Add to error history
-    this.errorHistory.push({ error: acpError, timestamp: new Date() });
-    if (this.errorHistory.length > this.MAX_ERROR_HISTORY) {
-      this.errorHistory.shift();
-    }
-
     return acpError;
   }
 
@@ -137,51 +117,20 @@ export class ACPErrorHandler {
   }
 
   /**
-   * Get error statistics for monitoring
+   * Get total error count
    */
-  public getErrorStats(): { total: number; recent: number; byCode: Record<string, number> } {
-    const now = Date.now();
-    const recentThreshold = 5 * 60 * 1000; // 5 minutes
-    
-    const recent = this.errorHistory.filter(
-      ({ timestamp }) => now - timestamp.getTime() < recentThreshold
-    ).length;
-
-    const byCode: Record<string, number> = {};
-    this.errorHistory.forEach(({ error }) => {
-      byCode[error.code] = (byCode[error.code] || 0) + 1;
-    });
-
-    return {
-      total: this.errorCount,
-      recent,
-      byCode
-    };
+  public getErrorCount(): number {
+    return this.errorCount;
   }
 
   /**
-   * Clear error history (useful for testing)
+   * Reset error count
    */
-  public clearHistory(): void {
-    this.errorHistory.length = 0;
+  public reset(): void {
     this.errorCount = 0;
   }
 
   private wrapError(error: Error, context: ErrorContext): ACPError {
-    // Detect specific error types and wrap appropriately
-    if (error.message.includes('validation') || error.message.includes('invalid')) {
-      return new ValidationError(error.message, context);
-    }
-    
-    if (error.message.includes('session')) {
-      return new SessionError(error.message, context.sessionId || 'unknown', context);
-    }
-    
-    if (error.message.includes('resource') || error.message.includes('limit') || error.message.includes('exhausted')) {
-      return new ResourceError(error.message, context);
-    }
-
-    // Generic wrapper
     return new ACPError(error.message, 'WRAPPED_ERROR', context, false);
   }
 

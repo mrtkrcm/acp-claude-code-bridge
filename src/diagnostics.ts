@@ -55,13 +55,8 @@ export class DiagnosticSystem {
       pathOverride,
       process.env.ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE,
       '/usr/local/bin/claude',
-      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', 
       '/opt/homebrew/bin/claude',
       '~/.local/bin/claude',
-      // Additional common installation paths
-      '~/.npm-global/bin/claude',
-      '/usr/bin/claude',
-      process.env.HOME ? `${process.env.HOME}/.local/share/pnpm/global/5/node_modules/.bin/claude` : null,
     ].filter(Boolean) as string[];
 
     for (const candidate of candidates) {
@@ -78,90 +73,35 @@ export class DiagnosticSystem {
       }
     }
 
-    // Try 'claude' in PATH with enhanced detection
+    // Try 'claude' in PATH
     return new Promise((resolve) => {
       const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-      const child = spawn(whichCmd, ['claude'], { 
-        stdio: 'pipe',
-        timeout: 5000  // 5 second timeout
-      });
+      const child = spawn(whichCmd, ['claude'], { stdio: 'pipe', timeout: 3000 });
       let output = '';
-      let resolved = false;
       
-      const resolveOnce = (value: string | null) => {
-        if (!resolved) {
-          resolved = true;
-          resolve(value);
-        }
-      };
-      
-      child.stdout?.on('data', (data) => {
-        output += data.toString();
-      });
-      
+      child.stdout?.on('data', (data) => output += data.toString());
       child.on('close', (code) => {
-        if (code === 0 && output.trim()) {
-          const path = output.trim().split('\n')[0]; // First result on Windows 'where'
-          resolveOnce(path);
-        } else {
-          resolveOnce(null);
-        }
+        resolve(code === 0 && output.trim() ? output.trim().split('\n')[0] : null);
       });
-      
-      child.on('error', (err) => {
-        console.warn(`Path detection failed: ${err.message}`);
-        resolveOnce(null);
-      });
-      
-      // Additional timeout safety net
-      setTimeout(() => {
-        if (!resolved) {
-          child.kill('SIGKILL');
-          resolveOnce(null);
-        }
-      }, 6000);
+      child.on('error', () => resolve(null));
     });
   }
 
   static async getClaudeVersion(executablePath: string): Promise<string | null> {
     return new Promise((resolve) => {
-      const child = spawn(executablePath, ['--version'], { 
-        stdio: 'pipe',
-        timeout: 5000  // 5 second timeout
-      });
+      const child = spawn(executablePath, ['--version'], { stdio: 'pipe', timeout: 3000 });
       let output = '';
-      let resolved = false;
       
-      const resolveOnce = (value: string | null) => {
-        if (!resolved) {
-          resolved = true;
-          resolve(value);
-        }
-      };
-      
-      child.stdout?.on('data', (data) => {
-        output += data.toString();
-      });
-      
+      child.stdout?.on('data', (data) => output += data.toString());
       child.on('close', (code) => {
         if (code === 0) {
-          // Extract version from output like "1.0.98 (Claude Code)"
           const match = output.match(/(\d+\.\d+\.\d+)/);
-          resolveOnce(match ? match[1] : output.trim());
+          resolve(match ? match[1] : output.trim());
         } else {
-          resolveOnce(null);
+          resolve(null);
         }
       });
-      
-      child.on('error', () => resolveOnce(null));
-      
-      // Additional timeout safety net
-      setTimeout(() => {
-        if (!resolved) {
-          child.kill('SIGKILL');
-          resolveOnce(null);
-        }
-      }, 6000);
+      child.on('error', () => resolve(null));
     });
   }
 
@@ -201,38 +141,19 @@ export class DiagnosticSystem {
       });
     }
 
-    // Enhanced Node.js version check
-    const nodeVersionMatch = platform.nodeVersion.match(/^v(\d+)\.(\d+)\.(\d+)/);
+    // Node.js version check
+    const nodeVersionMatch = platform.nodeVersion.match(/^v(\d+)/);
     if (nodeVersionMatch) {
-      const [, major, minor] = nodeVersionMatch;
-      const majorVersion = parseInt(major, 10);
-      const minorVersion = parseInt(minor, 10);
-      
+      const majorVersion = parseInt(nodeVersionMatch[1], 10);
       if (majorVersion < 18) {
         issues.push({
           level: 'error',
           category: 'platform',
           code: 'NODE_VERSION_OLD',
           message: `Node.js ${platform.nodeVersion} is too old (minimum: 18.0.0)`,
-          solution: 'Upgrade to Node.js 18 or later using nvm, n, or download from nodejs.org'
-        });
-      } else if (majorVersion === 18 && minorVersion < 12) {
-        issues.push({
-          level: 'warning',
-          category: 'platform',
-          code: 'NODE_VERSION_OUTDATED',
-          message: `Node.js ${platform.nodeVersion} is outdated (recommended: 18.12+)`,
-          solution: 'Consider upgrading to a more recent Node.js LTS version'
+          solution: 'Upgrade to Node.js 18 or later'
         });
       }
-    } else {
-      issues.push({
-        level: 'warning',
-        category: 'platform',
-        code: 'NODE_VERSION_UNKNOWN',
-        message: `Cannot parse Node.js version: ${platform.nodeVersion}`,
-        solution: 'Verify Node.js installation'
-      });
     }
 
     // Claude Code analysis
@@ -313,22 +234,13 @@ export class DiagnosticSystem {
       }
     }
 
-    // Enhanced compatibility scoring
+    // Simple compatibility scoring
     const errorCount = issues.filter(i => i.level === 'error').length;
     const warningCount = issues.filter(i => i.level === 'warning').length;
-    const infoCount = issues.filter(i => i.level === 'info').length;
     
-    let score = 100;
-    score -= errorCount * 30; // Errors are serious
-    score -= warningCount * 10; // Warnings are less serious  
-    score -= infoCount * 2; // Info items are minor
-    
-    // Bonus points for good configurations
-    if (claudeAvailable && claudeAuthenticated) score += 5;
-    if (platform.hasTTY) score += 2;
-    if (permissionMode !== 'default') score += 3; // Explicit permission mode is good
-    
-    score = Math.max(0, Math.min(100, score)); // Clamp between 0-100
+    let score = 100 - errorCount * 25 - warningCount * 5;
+    if (claudeAvailable && claudeAuthenticated) score += 10;
+    score = Math.max(0, Math.min(100, score));
 
     const compatible = errorCount === 0;
 
@@ -434,52 +346,17 @@ export class DiagnosticSystem {
   }
   
   /**
-   * Perform a health check with timing and error handling
-   */
-  private static async performHealthCheck(
-    name: string,
-    healthChecks: Array<{ name: string; status: 'pass' | 'fail' | 'warn'; message: string; duration?: number }>,
-    check: () => Promise<void>
-  ): Promise<void> {
-    const startTime = Date.now();
-    
-    try {
-      await check();
-      healthChecks.push({
-        name,
-        status: 'pass',
-        message: 'OK',
-        duration: Date.now() - startTime
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const isWarning = message.toLowerCase().includes('warning') || message.toLowerCase().includes('slow');
-      
-      healthChecks.push({
-        name,
-        status: isWarning ? 'warn' : 'fail',
-        message,
-        duration: Date.now() - startTime
-      });
-    }
-  }
-  
-  /**
-   * Get real-time system metrics
+   * Get basic system metrics
    */
   static getSystemMetrics(): {
     memory: NodeJS.MemoryUsage;
     uptime: number;
-    cpuUsage: NodeJS.CpuUsage;
     platform: NodeJS.Platform;
-    version: string;
   } {
     return {
       memory: process.memoryUsage(),
       uptime: process.uptime(),
-      cpuUsage: process.cpuUsage(),
       platform: process.platform,
-      version: process.version,
     };
   }
 }
