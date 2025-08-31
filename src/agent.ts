@@ -1448,43 +1448,14 @@ export class ClaudeACPAgent implements Agent {
     const progressPercent = Math.round((completedCount / totalCount) * 100);
     const inProgressCount = todos.filter(t => t.status === 'in_progress').length;
     
-    // Generate progress bar
-    const barLength = 30;
-    const filledLength = Math.round((completedCount / totalCount) * barLength);
-    const progressBar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
+    // Find current task
+    const currentTask = todos.find(t => t.status === 'in_progress');
+    const currentTaskContent = currentTask ? 
+      (typeof currentTask.content === 'string' ? currentTask.content : JSON.stringify(currentTask.content)) : 
+      'No active task';
     
-    // Header with progress bar
-    let display = `\n+-- [*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
-    display += `|   [${progressBar}] ${progressPercent}%\n`;
-    
-    if (inProgressCount > 0) {
-      display += `|   >> Currently working on ${inProgressCount} task${inProgressCount > 1 ? 's' : ''}\n`;
-    }
-    
-    display += `+--${'-'.repeat(50)}\n`;
-    
-    // Task list with better icons and formatting
-    todos.forEach((todo, index) => {
-      const statusIcon = 
-        todo.status === "completed" ? "[x]" :
-        todo.status === "in_progress" ? "[~]" : "[ ]";
-      
-      const statusText =
-        todo.status === "completed" ? "DONE" :
-        todo.status === "in_progress" ? "WORK" : "TODO";
-      
-      const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
-      const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
-      
-      // Truncate long content for better readability
-      const truncatedContent = content.length > 60 ? content.substring(0, 57) + '...' : content;
-      
-      display += `|   ${taskNumber}. [${statusText}] ${statusIcon} ${truncatedContent}\n`;
-    });
-    
-    display += `+--${('-'.repeat(50))}\n`;
-    
-    return display;
+    // Simple single-line format that works well in Zed
+    return `Tasks: ${completedCount}/${totalCount} complete (${progressPercent}%) | Currently: ${currentTaskContent}`;
   }
 
   /**
