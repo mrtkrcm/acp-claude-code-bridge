@@ -1,0 +1,30 @@
+{
+  "timestamp": "2025-08-31T06:31:06.868Z",
+  "duration": 35252,
+  "results": {
+    "passed": 10,
+    "failed": 1,
+    "errors": [
+      "Persistence integrity failed: Unexpected non-whitespace character after JSON at position 299 (line 11 column 2)"
+    ],
+    "metrics": {
+      "backedUpSessions": 1147,
+      "concurrentSessions": 10,
+      "synchronizationDuration": 19,
+      "sessionsCleanedUp": 0,
+      "memoryIncrease": 1584,
+      "sessionsCreated": 100,
+      "concurrentWrites": 10,
+      "sameSessionWrites": 5,
+      "errorRecoveryTests": 3,
+      "configurationTests": 3,
+      "loadTestThroughput": "9.87",
+      "loadTestSuccessRate": "100.0"
+    }
+  },
+  "environment": {
+    "nodeVersion": "v24.6.0",
+    "platform": "darwin",
+    "sessionDir": "/Users/m/.acp-claude-code/sessions"
+  }
+}
