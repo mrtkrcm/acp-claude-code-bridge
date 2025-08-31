@@ -959,7 +959,7 @@ export class ClaudeACPAgent implements Agent {
                 type: "content" as const,
                 content: {
                   type: "text" as const,
-                  text: this.getToolDescription(msg.tool_name || "", input),
+                  text: this.getEnhancedPermissionDescription(`execute ${msg.tool_name}`, msg.tool_name, input),
                 },
               },
             ],
@@ -969,7 +969,8 @@ export class ClaudeACPAgent implements Agent {
             sessionId,
             `execute ${msg.tool_name}`,
             toolCall,
-            this.getToolDescription(msg.tool_name || "", input)
+            msg.tool_name,
+            input
           );
 
           if (permission !== 'allowed') {
@@ -1194,7 +1195,8 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
-   * Enhanced permission system with better context awareness and fallback handling
+   * Unified permission system that handles both ACP and fallback permissions.
+   * Provides consistent permission checking for all tool operations.
    */
   private async requestUserPermission(
     sessionId: string,
@@ -1212,111 +1214,230 @@ export class ClaudeACPAgent implements Agent {
         };
       }>;
     },
-    _description?: string
+    toolName?: string,
+    input?: unknown
   ): Promise<'allowed' | 'denied' | 'cancelled'> {
     const session = this.sessions.get(sessionId);
     const permissionMode = session?.permissionMode || this.defaultPermissionMode;
     const contextStats = this.contextMonitor.getStats(sessionId);
     
-    this.logger.debug(`Permission check for '${operation}' - Mode: ${permissionMode}, Context: ${contextStats ? (contextStats.usage * 100).toFixed(1) + '%' : 'N/A'}`);
+    this.logger.debug(`Permission check for '${operation}' - Mode: ${permissionMode}, Tool: ${toolName || 'unknown'}, Context: ${contextStats ? (contextStats.usage * 100).toFixed(1) + '%' : 'N/A'}`);
 
+    // First check tool-specific permissions if tool name provided
+    if (toolName) {
+      const toolPermission = this.getToolPermissionLevel(toolName);
+      
+      if (toolPermission === 'deny' || !this.isToolAllowed(toolName)) {
+        this.logger.debug(`\u274c Tool '${toolName}' explicitly denied by configuration`);
+        return 'denied';
+      }
+      
+      if (toolPermission === 'allow' && permissionMode !== 'plan') {
+        this.logger.debug(`\u2705 Tool '${toolName}' explicitly allowed by configuration`);
+        return 'allowed';
+      }
+    }
+
+    // Check permission mode for bypass/auto-accept
     if (permissionMode === 'bypassPermissions') {
       this.logger.debug(`\u2705 Bypassing permission request for ${operation} (mode: ${permissionMode})`);
       return 'allowed';
     }
 
     if (permissionMode === 'acceptEdits') {
-      // More granular control for acceptEdits mode
-      if (toolCall.kind === 'execute' || operation.toLowerCase().includes('bash')) {
-        this.logger.debug(`\u26a0\ufe0f Execute operation requires explicit permission even in acceptEdits mode`);
-        // Continue to permission dialog
-      } else {
+      // Simplified acceptEdits logic: auto-accept non-execute operations
+      if (toolCall.kind !== 'execute' && !this.isExecuteOperation(operation)) {
         this.logger.debug(`\u2705 Auto-accepting ${toolCall.kind} operation: ${operation} (mode: ${permissionMode})`);
         return 'allowed';
       }
+      this.logger.debug(`\u26a0\ufe0f Execute operation requires explicit permission even in acceptEdits mode`);
+    }
+
+    // Always request permission in plan mode
+    if (permissionMode === 'plan') {
+      this.logger.debug(`\ud83d\udccb Plan mode - requesting permission for review: ${operation}`);
+      // Continue to permission dialog
     }
 
     // Use ACP native permission dialog if available
-    if (this.client.requestPermission) {
-      this.logger.debug(`Requesting ACP permission for: ${operation}`);
-      
-      try {
-        const options: PermissionOption[] = [
-          {
-            optionId: 'allow',
-            name: 'Allow Once',
-            kind: 'allow_once' as const,
-          },
-          {
-            optionId: 'deny',
-            name: 'Deny',
-            kind: 'reject_once' as const,
-          }
-        ];
-        
-        // Add "Always Allow" option for safe operations
-        if (toolCall.kind !== 'execute' && !operation.toLowerCase().includes('bash')) {
-          options.push({
-            optionId: 'always',
-            name: `Always Allow ${toolCall.kind}`,
-            kind: 'allow_always' as const,
-          });
-        }
-        
-        // Add session-specific options for power users
-        if (toolCall.kind === 'edit' || toolCall.kind === 'read') {
-          options.push({
-            optionId: 'session',
-            name: 'Allow for Session',
-            kind: 'allow_always' as const, // Treated as always for this session
-          });
-        }
-
-        const permissionRequest: RequestPermissionRequest = {
-          sessionId,
-          toolCall,
-          options,
-        };
-
-        const response = await this.client.requestPermission(permissionRequest);
-        
-        if (response.outcome.outcome === 'cancelled') {
-          this.logger.debug(`Permission request cancelled for: ${operation}`);
-          return 'cancelled';
-        } else if (response.outcome.outcome === 'selected') {
-          const selectedOption = response.outcome.optionId;
-          this.logger.debug(`Permission ${selectedOption} for: ${operation}`);
-          
-          if (session) {
-            if (selectedOption === 'always') {
-              session.permissionMode = 'acceptEdits';
-              this.logger.debug(`\u2699\ufe0f Updated session to acceptEdits mode for future ${toolCall.kind} operations`);
-            } else if (selectedOption === 'session') {
-              // Create a session-specific allowlist (extend AgentSession interface if needed)
-              session.permissionMode = 'acceptEdits'; // For now, treat as acceptEdits
-              this.logger.debug(`\ud83d\udcdd Session permission granted for ${toolCall.kind} operations`);
-            }
-          }
-          
-          const allowed = ['allow', 'always', 'session'].includes(selectedOption);
-          this.logger.debug(`Permission ${allowed ? 'GRANTED' : 'DENIED'} for: ${operation}`);
-          return allowed ? 'allowed' : 'denied';
-        }
-      } catch (error) {
-        this.logger.error(`ACP permission request failed: ${error}`);
-        // Fall through to default behavior
-      }
+    if (this.client && typeof this.client.requestPermission === 'function') {
+      return await this.requestACPPermission(sessionId, operation, toolCall, toolName, input);
     }
 
-    // Fallback: Check permission mode for default behavior
-    if (permissionMode === 'plan') {
-      this.logger.debug(`Plan mode - denying ${operation} for review`);
+    // Fallback to default behavior
+    this.logger.debug(`Default permission granted for: ${operation}`);
+    return 'allowed';
+  }
+
+  /**
+   * Request permission using ACP protocol with standardized options.
+   */
+  private async requestACPPermission(
+    sessionId: string,
+    operation: string,
+    toolCall: {
+      title: string;
+      kind: "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "other";
+      status: "pending" | "in_progress" | "completed" | "failed";
+      toolCallId: string;
+      content: Array<{
+        type: 'content';
+        content: {
+          type: 'text';
+          text: string;
+        };
+      }>;
+    },
+    toolName?: string,
+    input?: unknown
+  ): Promise<'allowed' | 'denied' | 'cancelled'> {
+    this.logger.debug(`Requesting ACP permission for: ${operation}`);
+      
+    try {
+      // Standard ACP permission options
+      const options: PermissionOption[] = [
+        {
+          optionId: 'allow',
+          name: 'Allow',
+          kind: 'allow_once' as const,
+        },
+        {
+          optionId: 'deny',
+          name: 'Deny',
+          kind: 'reject_once' as const,
+        }
+      ];
+      
+      // Add "Always Allow" for non-execute operations only
+      if (!this.isExecuteOperation(operation) && toolCall.kind !== 'execute') {
+        options.push({
+          optionId: 'always',
+          name: 'Always Allow',
+          kind: 'allow_always' as const,
+        });
+      }
+
+      // Enhance tool call with better context
+      const enhancedToolCall = {
+        ...toolCall,
+        title: this.getEnhancedPermissionTitle(operation, toolName, input),
+        content: [
+          {
+            type: 'content' as const,
+            content: {
+              type: 'text' as const,
+              text: this.getEnhancedPermissionDescription(operation, toolName, input),
+            },
+          },
+        ],
+      };
+
+      const permissionRequest: RequestPermissionRequest = {
+        sessionId,
+        toolCall: enhancedToolCall,
+        options,
+      };
+
+      const response = await this.client.requestPermission!(permissionRequest);
+      
+      if (response.outcome.outcome === 'cancelled') {
+        this.logger.debug(`Permission request cancelled for: ${operation}`);
+        return 'cancelled';
+      } else if (response.outcome.outcome === 'selected') {
+        const selectedOption = response.outcome.optionId;
+        this.logger.debug(`Permission ${selectedOption} selected for: ${operation}`);
+        
+        // Handle "always allow" by switching to acceptEdits mode
+        const session = this.sessions.get(sessionId);
+        if (selectedOption === 'always' && session) {
+          session.permissionMode = 'acceptEdits';
+          this.logger.debug(`⚙️ Switched to acceptEdits mode for future similar operations`);
+        }
+        
+        return selectedOption === 'allow' || selectedOption === 'always' ? 'allowed' : 'denied';
+      }
+    } catch (error) {
+      this.logger.error(`ACP permission request failed: ${error instanceof Error ? error.message : String(error)}`);
+      
+      // Return denied on error to be safe
+      this.logger.debug(`Denying operation due to permission system error: ${operation}`);
       return 'denied';
     }
 
-    // Default mode - allow (matches Claude's default behavior)
-    this.logger.debug(`Default permission granted for: ${operation}`);
-    return 'allowed';
+    // Should not reach here, but return denied as safe default
+    return 'denied';
+  }
+
+  /**
+   * Check if an operation is an execute/command operation.
+   */
+  private isExecuteOperation(operation: string): boolean {
+    const executeKeywords = ['bash', 'execute', 'command', 'run', 'script', 'shell'];
+    const operationLower = operation.toLowerCase();
+    return executeKeywords.some(keyword => operationLower.includes(keyword));
+  }
+
+  /**
+   * Generate enhanced permission title with context.
+   */
+  private getEnhancedPermissionTitle(operation: string, toolName?: string, input?: unknown): string {
+    if (toolName && input && typeof input === 'object' && input !== null) {
+      const inputObj = input as Record<string, unknown>;
+      
+      // File operations
+      if (inputObj.file_path || inputObj.path) {
+        const filePath = String(inputObj.file_path || inputObj.path);
+        const fileName = filePath.split('/').pop() || filePath;
+        return `${toolName}: ${fileName}`;
+      }
+      
+      // Command operations
+      if (inputObj.command) {
+        const command = String(inputObj.command).substring(0, 30);
+        return `Execute: ${command}${command.length > 30 ? '...' : ''}`;
+      }
+    }
+    
+    return operation;
+  }
+
+  /**
+   * Generate enhanced permission description with context and risk information.
+   */
+  private getEnhancedPermissionDescription(operation: string, toolName?: string, input?: unknown): string {
+    let description = operation;
+    let riskLevel = '';
+    
+    if (toolName && input && typeof input === 'object' && input !== null) {
+      const inputObj = input as Record<string, unknown>;
+      
+      // File operations with paths
+      if (inputObj.file_path || inputObj.path) {
+        const filePath = String(inputObj.file_path || inputObj.path);
+        description = `${toolName} operation on: ${filePath}`;
+        
+        if (toolName.toLowerCase().includes('write') || toolName.toLowerCase().includes('edit')) {
+          riskLevel = '⚠️ Modifies files';
+        } else if (toolName.toLowerCase().includes('delete')) {
+          riskLevel = '🚨 Deletes files';
+        }
+      }
+      
+      // Command operations
+      else if (inputObj.command) {
+        const command = String(inputObj.command);
+        description = `Execute command: ${command}`;
+        riskLevel = '🚨 Executes system commands';
+      }
+      
+      // Content operations
+      else if (inputObj.content) {
+        const contentLength = String(inputObj.content).length;
+        description = `${operation} (${contentLength} characters)`;
+      }
+    }
+    
+    return riskLevel ? `${description}\n\n${riskLevel}` : description;
   }
 
   /**
@@ -1383,7 +1504,8 @@ export class ClaudeACPAgent implements Agent {
           sessionId,
           `read file ${filePath}`,
           toolCall,
-          `Read contents of ${filePath}`
+          'Read',
+          inputObj
         );
 
         if (permission !== 'allowed') {
@@ -1502,7 +1624,8 @@ export class ClaudeACPAgent implements Agent {
           sessionId,
           `write ${content.length} characters to ${filePath}`,
           toolCall,
-          `Write ${content.length} characters to ${filePath}`
+          'Write',
+          inputObj
         );
 
         if (permission !== 'allowed') {
@@ -1679,52 +1802,6 @@ export class ClaudeACPAgent implements Agent {
     return this.toolPermissions.defaultPermission || 'allow';
   }
 
-  /**
-   * Gets a human-readable description of what a tool operation will do.
-   */
-  private getToolDescription(toolName: string, input: unknown): string {
-    const lowerToolName = toolName.toLowerCase();
-    
-    if (!input || typeof input !== 'object' || input === null) {
-      return `Execute ${toolName}`;
-    }
-
-    const inputObj = input as Record<string, unknown>;
-
-    // Bash/Execute operations
-    if (lowerToolName.includes('bash') || lowerToolName.includes('execute')) {
-      if (inputObj.command && typeof inputObj.command === 'string') {
-        const cmd = String(inputObj.command).substring(0, 50);
-        return `Execute command: ${cmd}${cmd.length > 50 ? '...' : ''}`;
-      }
-      return `Execute shell command`;
-    }
-
-    // File operations
-    if (lowerToolName.includes('write') || lowerToolName.includes('edit')) {
-      if (inputObj.file_path) {
-        const content = inputObj.content ? ` (${String(inputObj.content).length} chars)` : '';
-        return `Modify file ${inputObj.file_path}${content}`;
-      }
-      return `Modify files`;
-    }
-
-    if (lowerToolName.includes('delete') || lowerToolName.includes('remove')) {
-      if (inputObj.file_path || inputObj.path) {
-        return `Delete ${inputObj.file_path || inputObj.path}`;
-      }
-      return `Delete files`;
-    }
-
-    if (lowerToolName.includes('move') || lowerToolName.includes('rename')) {
-      if (inputObj.source && inputObj.destination) {
-        return `Move ${inputObj.source} to ${inputObj.destination}`;
-      }
-      return `Move/rename files`;
-    }
-
-    return `Execute ${toolName}`;
-  }
 
   private getEnhancedToolTitle(toolName: string, input?: unknown): string {
     const lowerName = toolName.toLowerCase();
