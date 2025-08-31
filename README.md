@@ -36,7 +36,7 @@ Add to your Zed settings.json:
   "agent_servers": {
     "claude-code": {
       "command": "npx",
-      "args": ["acp-claude-code"]
+      "args": ["@mrtkrcm/acp-claude-code"]
     }
   }
 }
@@ -51,7 +51,7 @@ To auto-accept file edits (recommended for better workflow):
   "agent_servers": {
     "claude-code": {
       "command": "npx",
-      "args": ["acp-claude-code"],
+      "args": ["@mrtkrcm/acp-claude-code"],
       "env": {
         "ACP_PERMISSION_MODE": "acceptEdits"
       }
@@ -67,7 +67,7 @@ To bypass all permissions (use with caution):
   "agent_servers": {
     "claude-code": {
       "command": "npx",
-      "args": ["acp-claude-code"],
+      "args": ["@mrtkrcm/acp-claude-code"],
       "env": {
         "ACP_PERMISSION_MODE": "bypassPermissions"
       }
@@ -85,7 +85,7 @@ For troubleshooting:
   "agent_servers": {
     "claude-code": {
       "command": "npx",
-      "args": ["acp-claude-code"],
+      "args": ["@mrtkrcm/acp-claude-code"],
       "env": {
         "ACP_DEBUG": "true",
         "ACP_PERMISSION_MODE": "acceptEdits"
@@ -104,7 +104,7 @@ If you need to use a specific Claude Code executable (e.g., development build):
   "agent_servers": {
     "claude-code": {
       "command": "npx",
-      "args": ["acp-claude-code"],
+      "args": ["@mrtkrcm/acp-claude-code"],
       "env": {
         "ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE": "/path/to/your/claude-code",
         "ACP_PERMISSION_MODE": "acceptEdits"
@@ -123,7 +123,7 @@ If you prefer pnpm:
   "agent_servers": {
     "claude-code": {
       "command": "pnpx",
-      "args": ["acp-claude-code"],
+      "args": ["@mrtkrcm/acp-claude-code"],
       "env": {
         "ACP_PERMISSION_MODE": "acceptEdits"
       }
@@ -140,8 +140,8 @@ If you want to build and run from source instead of using the npm package:
 
 ```bash
 # Clone the repository
-git clone https://github.com/xuanwo/acp-claude-code.git
-cd acp-claude-code
+git clone https://github.com/mrtkrcm/acp-claude-code-bridge.git
+cd acp-claude-code-bridge
 
 # Install dependencies
 pnpm install
@@ -252,7 +252,7 @@ Debug logging can be enabled in your Zed configuration (see usage examples above
 
 ```bash
 # Set the debug environment variable
-ACP_DEBUG=true npx acp-claude-code
+ACP_DEBUG=true npx @mrtkrcm/acp-claude-code
 ```
 
 Debug logs will output:

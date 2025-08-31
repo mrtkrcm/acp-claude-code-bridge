@@ -1,11 +1,11 @@
 {
-  "name": "acp-claude-code",
+  "name": "@mrtkrcm/acp-claude-code",
   "version": "0.6.0",
   "description": "ACP (Agent Client Protocol) bridge for Claude Code",
   "main": "dist/cli.js",
   "type": "module",
   "bin": {
-    "acp-claude-code": "dist/cli.js"
+    "@mrtkrcm/acp-claude-code": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -17,12 +17,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xuanwo/acp-claude-code.git"
+    "url": "git+https://github.com/mrtkrcm/acp-claude-code-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/xuanwo/acp-claude-code/issues"
+    "url": "https://github.com/mrtkrcm/acp-claude-code-bridge/issues"
   },
-  "homepage": "https://github.com/xuanwo/acp-claude-code#readme",
+  "homepage": "https://github.com/mrtkrcm/acp-claude-code-bridge#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
