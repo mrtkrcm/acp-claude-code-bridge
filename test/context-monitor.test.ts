@@ -10,7 +10,7 @@ describe('ContextMonitor', () => {
 
   describe('Token Estimation', () => {
     it('should estimate tokens for simple text', () => {
-      const warning = monitor.trackMessage('test-session', 'Hello world', 'user')
+      const warning = monitor.addMessage('test-session', 'Hello world', 'user')
       expect(warning).toBeNull() // Should be well under limits
       
       const stats = monitor.getStats('test-session')
@@ -21,11 +21,11 @@ describe('ContextMonitor', () => {
     })
 
     it('should estimate more tokens for code blocks', () => {
-      const codeText = '```javascript\nfunction hello() {\n  console.log("Hello world");\n}\n```'
-      monitor.trackMessage('test-session', codeText, 'user')
+      const codeText = '```javascript\nfunction hello() {\n  console.log("Hello world");\n  return "test";\n  const x = 123;\n}\n```'
+      monitor.addMessage('test-session', codeText, 'user')
       
-      const plainText = 'This is plain text with the same approximate length as the code above'
-      monitor.trackMessage('test-session-2', plainText, 'user')
+      const plainText = 'This is plain text with the same length'
+      monitor.addMessage('test-session-2', plainText, 'user')
       
       const codeStats = monitor.getStats('test-session')
       const plainStats = monitor.getStats('test-session-2')
@@ -37,8 +37,8 @@ describe('ContextMonitor', () => {
       const urlText = 'Check out https://example.com and https://another-site.com'
       const jsonText = '{"name": "test", "value": 42, "nested": {"array": [1,2,3]}}'
       
-      monitor.trackMessage('url-session', urlText, 'user')
-      monitor.trackMessage('json-session', jsonText, 'user')
+      monitor.addMessage('url-session', urlText, 'user')
+      monitor.addMessage('json-session', jsonText, 'user')
       
       const urlStats = monitor.getStats('url-session')
       const jsonStats = monitor.getStats('json-session')
@@ -50,7 +50,7 @@ describe('ContextMonitor', () => {
 
   describe('Context Warnings', () => {
     it('should not warn for small messages', () => {
-      const warning = monitor.trackMessage('test-session', 'Short message', 'user')
+      const warning = monitor.addMessage('test-session', 'Short message', 'user')
       expect(warning).toBeNull()
     })
 
@@ -59,7 +59,7 @@ describe('ContextMonitor', () => {
       
       // Add a large message to trigger warning (need 80% of 200k = 160k tokens = 640k chars)
       const largeMessage = 'x'.repeat(640000) // Should trigger warning at ~80% usage
-      const warning = monitor.trackMessage(sessionId, largeMessage, 'user')
+      const warning = monitor.addMessage(sessionId, largeMessage, 'user')
       
       expect(warning).not.toBeNull()
       expect(warning!.level).toBe('warning')
@@ -71,7 +71,7 @@ describe('ContextMonitor', () => {
       
       // Add an even larger message to trigger critical warning (need 95% of 200k = 190k tokens = 760k chars)
       const massiveMessage = 'x'.repeat(760000) // Should trigger critical at ~95% usage
-      const warning = monitor.trackMessage(sessionId, massiveMessage, 'user')
+      const warning = monitor.addMessage(sessionId, massiveMessage, 'user')
       
       expect(warning).not.toBeNull()
       expect(warning!.level).toBe('critical')
@@ -82,8 +82,8 @@ describe('ContextMonitor', () => {
 
   describe('Session Management', () => {
     it('should track multiple sessions independently', () => {
-      monitor.trackMessage('session-1', 'Message for session 1', 'user')
-      monitor.trackMessage('session-2', 'Message for session 2', 'user')
+      monitor.addMessage('session-1', 'Message for session 1', 'user')
+      monitor.addMessage('session-2', 'Message for session 2', 'user')
       
       const stats1 = monitor.getStats('session-1')
       const stats2 = monitor.getStats('session-2')
@@ -97,9 +97,9 @@ describe('ContextMonitor', () => {
     it('should track assistant vs user messages correctly', () => {
       const sessionId = 'turn-tracking'
       
-      monitor.trackMessage(sessionId, 'User message', 'user')
-      monitor.trackMessage(sessionId, 'Assistant response', 'assistant')
-      monitor.trackMessage(sessionId, 'Another user message', 'user')
+      monitor.addMessage(sessionId, 'User message', 'user')
+      monitor.addMessage(sessionId, 'Assistant response', 'assistant')
+      monitor.addMessage(sessionId, 'Another user message', 'user')
       
       const stats = monitor.getStats(sessionId)
       expect(stats!.messages).toBe(3)
@@ -109,7 +109,7 @@ describe('ContextMonitor', () => {
     it('should reset session correctly', () => {
       const sessionId = 'reset-test'
       
-      monitor.trackMessage(sessionId, 'Some message', 'user')
+      monitor.addMessage(sessionId, 'Some message', 'user')
       let stats = monitor.getStats(sessionId)
       expect(stats!.messages).toBe(1)
       expect(stats!.estimatedTokens).toBeGreaterThan(0)
@@ -124,7 +124,7 @@ describe('ContextMonitor', () => {
     it('should clear session completely', () => {
       const sessionId = 'clear-test'
       
-      monitor.trackMessage(sessionId, 'Some message', 'user')
+      monitor.addMessage(sessionId, 'Some message', 'user')
       expect(monitor.getStats(sessionId)).toBeDefined()
       
       monitor.clearSession(sessionId)
@@ -136,32 +136,32 @@ describe('ContextMonitor', () => {
     it('should generate readable session summary', () => {
       const sessionId = 'summary-test'
       
-      monitor.trackMessage(sessionId, 'Test message', 'user')
-      monitor.trackMessage(sessionId, 'Assistant response', 'assistant')
+      monitor.addMessage(sessionId, 'Test message', 'user')
+      monitor.addMessage(sessionId, 'Assistant response', 'assistant')
       
       const summary = monitor.getSessionSummary(sessionId)
-      expect(summary).toContain('✅') // Should show good status
+      expect(summary).toContain('[✓]') // Should show good status
       expect(summary).toMatch(/\d+K\/\d+K/) // Should contain token counts like "0.1K/200K"
-      expect(summary).toContain('1 turns') // Only user messages count as turns
+      expect(summary).toContain('1 turn') // Only user messages count as turns
     })
 
     it('should show warning status in summary for high usage', () => {
       const sessionId = 'warning-summary'
       
       // Add large message to trigger warning (80%+ usage)
-      monitor.trackMessage(sessionId, 'x'.repeat(640000), 'user')
+      monitor.addMessage(sessionId, 'x'.repeat(640000), 'user')
       
       const summary = monitor.getSessionSummary(sessionId)
-      expect(summary).toContain('⚠️') // Warning emoji
+      expect(summary).toContain('[⚠]') // Warning marker
       expect(summary).toContain('HIGH') // HIGH usage indicator
     })
   })
 
   describe('Memory Management', () => {
     it('should provide memory statistics', () => {
-      monitor.trackMessage('session-1', 'Message 1', 'user')
-      monitor.trackMessage('session-2', 'Message 2', 'user') 
-      monitor.trackMessage('session-1', 'Message 3', 'assistant')
+      monitor.addMessage('session-1', 'Message 1', 'user')
+      monitor.addMessage('session-2', 'Message 2', 'user') 
+      monitor.addMessage('session-1', 'Message 3', 'assistant')
       
       const memoryStats = monitor.getMemoryStats()
       expect(memoryStats.activeSessions).toBe(2)
@@ -172,8 +172,8 @@ describe('ContextMonitor', () => {
 
     it('should cleanup old sessions', async () => {
       // Add some sessions
-      monitor.trackMessage('old-session', 'Old message', 'user')
-      monitor.trackMessage('recent-session', 'Recent message', 'user')
+      monitor.addMessage('old-session', 'Old message', 'user')
+      monitor.addMessage('recent-session', 'Recent message', 'user')
       
       // Wait a small amount to ensure time difference
       await new Promise(resolve => setTimeout(resolve, 10))

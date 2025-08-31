@@ -98,12 +98,15 @@ export class ClaudeACPAgent implements Agent {
       debugMode: this.DEBUG
     });
     
-    // Enhanced session cleanup with logging
+    // Session cleanup and monitoring
     setInterval(() => {
       const cleanedCount = this.contextMonitor.cleanupOldSessions();
       if (cleanedCount > 0) {
         this.log(`Cleaned up ${cleanedCount} old context sessions`, 'DEBUG');
       }
+      
+      // Memory monitoring
+      this.monitorMemoryUsage();
       
       // Also cleanup orphaned agent sessions
       this.cleanupOrphanedSessions();
@@ -146,6 +149,25 @@ export class ClaudeACPAgent implements Agent {
     }
     
     this.log('Configuration validated successfully', 'INFO');
+  }
+
+  private monitorMemoryUsage(): void {
+    const usage = process.memoryUsage();
+    const heapMB = Math.round(usage.heapUsed / 1024 / 1024);
+    const rss = Math.round(usage.rss / 1024 / 1024);
+    
+    // Log memory stats every hour
+    this.log(`Memory usage: ${heapMB}MB heap, ${rss}MB RSS`, 'DEBUG');
+    
+    // Warn on high usage
+    if (usage.heapUsed > 500 * 1024 * 1024) { // 500MB
+      this.log(`High memory usage detected: ${heapMB}MB heap`, 'WARN');
+    }
+    
+    // Critical memory warning
+    if (usage.heapUsed > 1024 * 1024 * 1024) { // 1GB
+      this.log(`Critical memory usage: ${heapMB}MB heap - consider restart`, 'ERROR');
+    }
   }
 
   private detectExtendedCapabilities(params: InitializeRequest): ExtendedClientCapabilities {
@@ -469,7 +491,7 @@ export class ClaudeACPAgent implements Agent {
       );
       
       // Track context usage for user message
-      const contextWarning = this.contextMonitor.trackMessage(currentSessionId, promptText, 'user');
+      const contextWarning = this.contextMonitor.addMessage(currentSessionId, promptText);
       if (contextWarning) {
         this.log(`Context warning: ${contextWarning.message}`, 'DEBUG');
         
@@ -651,7 +673,6 @@ export class ClaudeACPAgent implements Agent {
     } catch (error) {
       this.log("Error during prompt processing:", error);
       
-      // Enhanced error logging with context
       const contextStats = this.contextMonitor.getStats(currentSessionId);
       if (contextStats) {
         this.log(`Error occurred at context usage: ${(contextStats.usage * 100).toFixed(1)}%`, 'DEBUG');
@@ -755,7 +776,7 @@ export class ClaudeACPAgent implements Agent {
               const text = content.text || "";
               
               // Track context usage for assistant message with enhanced monitoring
-              const assistantContextWarning = this.contextMonitor.trackMessage(sessionId, text, 'assistant');
+              const assistantContextWarning = this.contextMonitor.addMessage(sessionId, text);
               if (assistantContextWarning && assistantContextWarning.level === 'critical') {
                 this.log(`Critical context usage detected: ${assistantContextWarning.message}`, 'DEBUG');
                 // Could notify user here if needed, but avoid interrupting the flow
@@ -809,8 +830,7 @@ export class ClaudeACPAgent implements Agent {
                   status: string;
                   activeForm: string;
                 }>;
-                // Create enhanced todo display with ASCII indicators
-                const completedCount = todos.filter(t => t.status === 'completed').length;
+                        const completedCount = todos.filter(t => t.status === 'completed').length;
                 const totalCount = todos.length;
                 const progressPercent = Math.round((completedCount / totalCount) * 100);
                 
@@ -1012,7 +1032,6 @@ export class ClaudeACPAgent implements Agent {
           }
         }
 
-        // Enhanced tool call with descriptive title and location
         const toolTitle = this.getEnhancedToolTitle(msg.tool_name || "Tool", input);
         const toolLocation = this.getToolLocation(msg.tool_name || "Tool", input);
         
@@ -1050,7 +1069,6 @@ export class ClaudeACPAgent implements Agent {
             }
           ).todos;
           if (todos && Array.isArray(todos)) {
-            // Enhanced todo update display
             const completedCount = todos.filter(t => t.status === 'completed').length;
             const totalCount = todos.length;
             const progressPercent = Math.round((completedCount / totalCount) * 100);
@@ -1212,7 +1230,6 @@ export class ClaudeACPAgent implements Agent {
     },
     _description?: string
   ): Promise<'allowed' | 'denied' | 'cancelled'> {
-    // Enhanced permission mode handling with better logging and context
     const session = this.sessions.get(sessionId);
     const permissionMode = session?.permissionMode || this.defaultPermissionMode;
     const contextStats = this.contextMonitor.getStats(sessionId);
@@ -1240,7 +1257,6 @@ export class ClaudeACPAgent implements Agent {
       this.log(`Requesting ACP permission for: ${operation}`, 'DEBUG');
       
       try {
-        // Enhanced permission options based on operation type
         const options: PermissionOption[] = [
           {
             optionId: 'allow',
@@ -1287,7 +1303,6 @@ export class ClaudeACPAgent implements Agent {
           const selectedOption = response.outcome.optionId;
           this.log(`Permission ${selectedOption} for: ${operation}`, 'DEBUG');
           
-          // Enhanced permission mode updating based on user choice
           if (session) {
             if (selectedOption === 'always') {
               session.permissionMode = 'acceptEdits';
@@ -1916,7 +1931,7 @@ export class ClaudeACPAgent implements Agent {
    */
   getSessionSummary(sessionId: string): string {
     const session = this.sessions.get(sessionId);
-    const contextSummary = this.contextMonitor.getSessionSummary(sessionId);
+    const contextStats = this.contextMonitor.getStats(sessionId);
     
     if (!session) {
       return `Session ${sessionId}: Not found`;
@@ -1926,7 +1941,11 @@ export class ClaudeACPAgent implements Agent {
     const permission = session.permissionMode || this.defaultPermissionMode;
     const claudeSession = session.claudeSessionId ? `Claude:${session.claudeSessionId.substring(0, 8)}` : 'New';
     
-    return `${status} ${claudeSession} | ${permission} | ${contextSummary}`;
+    const contextInfo = contextStats 
+      ? `${Math.round(contextStats.usage * 100)}%`
+      : '0%';
+
+    return `${status} ${claudeSession} | ${permission} | ${contextInfo}`;
   }
 
   /**
@@ -2030,7 +2049,6 @@ export class ClaudeACPAgent implements Agent {
     }];
 
     try {
-      // Enhanced content processing - for now return as text with descriptive labels
       let enhancedText = outputText;
       
       // Check if this is a file operation that should create resource content
