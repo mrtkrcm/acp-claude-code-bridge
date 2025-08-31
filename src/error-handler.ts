@@ -265,12 +265,3 @@ export function handleProtocolError(message: string, context: ErrorContext = {})
   throw error;
 }
 
-export function wrapAsyncOperation<T>(
-  operation: () => Promise<T>,
-  context: ErrorContext = {}
-): Promise<T> {
-  return operation().catch(error => {
-    const acpError = getGlobalErrorHandler().handleError(error, context);
-    throw acpError;
-  });
-}

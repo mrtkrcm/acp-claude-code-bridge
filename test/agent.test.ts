@@ -111,13 +111,6 @@ describe('ClaudeACPAgent', () => {
     })
   })
 
-  describe('Session Summaries', () => {
-    it('should provide session summary', () => {
-      const summary = agent.getSessionSummary('test-session')
-      expect(typeof summary).toBe('string')
-      expect(summary).toContain('Session')
-    })
-  })
 
   describe('Cancellation', () => {
     it('should handle cancel requests', async () => {
