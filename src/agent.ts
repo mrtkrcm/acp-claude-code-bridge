@@ -98,6 +98,7 @@ export class ClaudeACPAgent implements Agent {
   private streamingCleanupTimer?: NodeJS.Timeout;
   private batchCleanupTimer?: NodeJS.Timeout;
   private queryQueue: Array<() => Promise<void>> = [];
+  private isShuttingDown: boolean = false;
   private isProcessingQueue = false;
   private readonly MAX_RETRY_ATTEMPTS = 3;
   private readonly RETRY_DELAY_MS = 1000;
@@ -3412,7 +3413,13 @@ export class ClaudeACPAgent implements Agent {
     const existingLock = this.sessionLocks.get(sessionId);
     if (existingLock) {
       const timeout = new Promise<void>((_, reject) => 
-        setTimeout(() => reject(new Error(`Session lock timeout for ${sessionId}`)), 30000)
+        setTimeout(() => {
+          if (this.isShuttingDown) {
+            reject(new Error(`Session lock cancelled during shutdown`));
+          } else {
+            reject(new Error(`Session lock timeout for ${sessionId}`));
+          }
+        }, 30000)
       );
       
       await Promise.race([existingLock, timeout])
@@ -3420,7 +3427,14 @@ export class ClaudeACPAgent implements Agent {
     }
 
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Session operation timeout for ${sessionId}`)), 60000)
+      setTimeout(() => {
+        // Don't report timeout errors if the agent is shutting down
+        if (this.isShuttingDown) {
+          reject(new Error(`Session operation cancelled during shutdown`));
+        } else {
+          reject(new Error(`Session operation timeout for ${sessionId}`));
+        }
+      }, 60000)
     );
     
     const operationPromise = Promise.race([operation(), timeoutPromise]);
@@ -3429,8 +3443,14 @@ export class ClaudeACPAgent implements Agent {
     try {
       return await operationPromise;
     } catch (error) {
+      // Don't log errors during shutdown - they're expected
+      const errorMessage = String(error);
+      if (errorMessage.includes('cancelled during shutdown')) {
+        throw error; // Re-throw silently without logging
+      }
+      
       // On timeout or error, ensure session state is properly cleaned up
-      if (String(error).includes('timeout')) {
+      if (errorMessage.includes('timeout')) {
         const session = this.sessions.get(sessionId);
         if (session) {
           // Clear pending prompt state to prevent "busy" condition
@@ -3514,6 +3534,9 @@ export class ClaudeACPAgent implements Agent {
    * Cleanup method called on shutdown
    */
   destroy(): void {
+    // Set shutdown flag to suppress timeout error reporting
+    this.isShuttingDown = true;
+    
     if (this.streamingCleanupTimer) {
       clearInterval(this.streamingCleanupTimer);
     }
