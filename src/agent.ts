@@ -330,6 +330,14 @@ export class ClaudeACPAgent implements Agent {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: true, // Enable session loading
+        promptCapabilities: {
+          // Claude supports image inputs (screenshots, diagrams, etc.)
+          image: true,
+          // Claude does not support audio inputs
+          audio: false,
+          // Enable embedded context for rich content processing
+          embeddedContext: true
+        }
       },
     };
   }

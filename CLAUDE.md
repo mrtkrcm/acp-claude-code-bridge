@@ -36,10 +36,10 @@ The `ClaudeACPAgent` class orchestrates all bridge functionality:
 - **Context Monitoring**: Tracks 200k context window usage with warnings and cleanup
 
 ### 2. Context Monitor (src/context-monitor.ts) - Resource Management
-Prevents context overflow with smart monitoring:
-- Token estimation based on character/word analysis
+Prevents context overflow with efficient monitoring:
+- Simple token estimation using length/4 ratio
 - Automatic warnings at 80% and critical alerts at 95%
-- Per-session tracking with cleanup
+- Per-session tracking with cleanup and memory statistics
 
 ### 3. Diagnostics (src/diagnostics.ts) - System Health
 Comprehensive platform and configuration validation:
