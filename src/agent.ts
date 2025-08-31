@@ -1570,7 +1570,7 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
-   * Generate optimized single-line task progress display with icons.
+   * Generate optimized single-line task progress display with better ASCII icons.
    */
   private generateTaskProgressDisplay(
     todos: Array<{
@@ -1584,7 +1584,7 @@ export class ClaudeACPAgent implements Agent {
     // Find current and next tasks for enhanced display
     const currentTask = todos.find(t => t.status === 'in_progress');
     if (!currentTask) {
-      return `✓ All ${totalCount} tasks completed`;
+      return `[✓] All ${totalCount} tasks completed`;
     }
     
     const currentTaskContent = typeof currentTask.content === 'string' ? 
@@ -1593,13 +1593,14 @@ export class ClaudeACPAgent implements Agent {
     // Find next pending task
     const nextTask = todos.find(t => t.status === 'pending');
     
-    // Option 3: Pipe Separator Style (most readable) - no truncation
-    let display = `✓ Task ${completedCount + 1}/${totalCount}: ${currentTaskContent}`;
+    // Enhanced progress display with better ASCII icons
+    const progressBar = `[${completedCount}/${totalCount}]`;
+    let display = `[▶] ${progressBar} ${currentTaskContent}`;
     
     if (nextTask) {
       const nextTaskContent = typeof nextTask.content === 'string' ? 
         nextTask.content : JSON.stringify(nextTask.content);
-      display += ` | ⏭ Next: ${nextTaskContent}`;
+      display += ` → [○] ${nextTaskContent}`;
     }
     
     return display;
