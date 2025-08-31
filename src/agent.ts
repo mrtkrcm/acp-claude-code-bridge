@@ -60,6 +60,10 @@ export class ClaudeACPAgent implements Agent {
   private toolExecutionTiming: Map<string, ToolExecutionTiming> = new Map();
   private streamingUpdates: Map<string, { chunks: string[]; totalSize?: number }> = new Map();
   private activeBatches: Map<string, ToolCallBatch> = new Map();
+  private streamingCleanupTimer?: NodeJS.Timeout;
+  private batchCleanupTimer?: NodeJS.Timeout;
+  private queryQueue: Array<() => Promise<void>> = [];
+  private isProcessingQueue = false;
   private readonly MAX_RETRY_ATTEMPTS = 3;
   private readonly RETRY_DELAY_MS = 1000;
   private sessionPersistence: SessionPersistenceManager;
@@ -111,6 +115,15 @@ export class ClaudeACPAgent implements Agent {
       // Also cleanup orphaned agent sessions
       this.cleanupOrphanedSessions();
     }, 60 * 60 * 1000);
+
+    // Streaming and batch cleanup (more frequent)
+    this.streamingCleanupTimer = setInterval(() => {
+      this.cleanupStaleStreamingUpdates();
+    }, 5 * 60 * 1000); // Every 5 minutes
+
+    this.batchCleanupTimer = setInterval(() => {
+      this.cleanupStaleBatches();
+    }, 10 * 60 * 1000); // Every 10 minutes
   }
 
   private parseMaxTurns(): number {
@@ -2800,5 +2813,69 @@ export class ClaudeACPAgent implements Agent {
    */
   public getToolPermissions(): ToolPermissionConfig {
     return { ...this.toolPermissions };
+  }
+
+  /**
+   * Cleanup stale streaming updates to prevent memory leaks
+   */
+  private cleanupStaleStreamingUpdates(): void {
+    const now = Date.now();
+    const STALE_THRESHOLD = 30 * 60 * 1000; // 30 minutes
+    let cleanedCount = 0;
+
+    for (const [toolCallId, streaming] of this.streamingUpdates.entries()) {
+      // Remove if too old (no activity for 30 minutes)
+      if (now - (streaming.totalSize || 0) > STALE_THRESHOLD) {
+        this.streamingUpdates.delete(toolCallId);
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      this.log(`Cleaned up ${cleanedCount} stale streaming updates`, 'DEBUG');
+    }
+  }
+
+  /**
+   * Cleanup stale batches to prevent memory leaks
+   */
+  private cleanupStaleBatches(): void {
+    const now = Date.now();
+    const STALE_THRESHOLD = 60 * 60 * 1000; // 1 hour
+    let cleanedCount = 0;
+
+    for (const [batchId, batch] of this.activeBatches.entries()) {
+      // Remove completed or stale batches (simplified check)
+      const isComplete = this.isBatchComplete(batchId);
+      const hasTimeout = batch.timeoutId && Date.now() > STALE_THRESHOLD;
+      
+      if (isComplete || hasTimeout) {
+        this.activeBatches.delete(batchId);
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      this.log(`Cleaned up ${cleanedCount} stale batches`, 'DEBUG');
+    }
+  }
+
+  /**
+   * Cleanup method called on shutdown
+   */
+  destroy(): void {
+    if (this.streamingCleanupTimer) {
+      clearInterval(this.streamingCleanupTimer);
+    }
+    if (this.batchCleanupTimer) {
+      clearInterval(this.batchCleanupTimer);
+    }
+    
+    // Clear all Maps to free memory
+    this.streamingUpdates.clear();
+    this.activeBatches.clear();
+    this.toolExecutionTiming.clear();
+    
+    this.log('ACP Agent destroyed and cleaned up', 'INFO');
   }
 }

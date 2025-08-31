@@ -81,10 +81,12 @@ export async function main() {
 
     // We're implementing an Agent, so we use AgentSideConnection
     // First parameter is output (to client), second is input (from client)
+    let agent: ClaudeACPAgent | null = null;
     new AgentSideConnection(
       (client) => {
         log("Creating ClaudeACPAgent with client", 'DEBUG');
-        return new ClaudeACPAgent(client);
+        agent = new ClaudeACPAgent(client);
+        return agent;
       },
       outputStream, // WritableStream for sending data to client (stdout)
       inputStream, // ReadableStream for receiving data from client (stdin)
@@ -101,6 +103,9 @@ export async function main() {
     // Handle graceful shutdown
     process.on("SIGINT", () => {
       log("Received SIGINT, shutting down...", 'INFO');
+      if (agent && typeof agent.destroy === 'function') {
+        agent.destroy();
+      }
       if (fileLogger) {
         fileLogger.write(`=== ACP Bridge Stopped at ${new Date().toISOString()} ===\n`);
         fileLogger.end();
@@ -110,6 +115,9 @@ export async function main() {
 
     process.on("SIGTERM", () => {
       log("Received SIGTERM, shutting down...", 'INFO');
+      if (agent && typeof agent.destroy === 'function') {
+        agent.destroy();
+      }
       if (fileLogger) {
         fileLogger.write(`=== ACP Bridge Stopped at ${new Date().toISOString()} ===\n`);
         fileLogger.end();
