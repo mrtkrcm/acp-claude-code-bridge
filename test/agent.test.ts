@@ -53,7 +53,10 @@ describe('ClaudeACPAgent', () => {
 
   describe('Session Management', () => {
     it('should create new session', async () => {
-      const response = await agent.newSession({})
+      const response = await agent.newSession({ 
+        cwd: process.cwd(),
+        mcpServers: []
+      })
       
       expect(response).toHaveProperty('sessionId')
       expect(typeof response.sessionId).toBe('string')
@@ -64,7 +67,11 @@ describe('ClaudeACPAgent', () => {
       const sessionId = 'test-session-id'
       
       // Should not throw error
-      await expect(agent.loadSession?.({ sessionId })).resolves.toBeUndefined()
+      await expect(agent.loadSession?.({ 
+        sessionId, 
+        cwd: process.cwd(),
+        mcpServers: []
+      })).resolves.toBeUndefined()
     })
   })
 

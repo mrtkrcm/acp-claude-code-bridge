@@ -135,6 +135,32 @@ export class SessionPersistenceManager {
     } catch { /* ignore directory read errors */ }
   }
   
+  async getAllSessions(): Promise<PersistedSessionData[]> {
+    try {
+      await this.ensureDirectoryExists();
+      const files = await readdir(this.baseDir);
+      const sessionFiles = files.filter(f => f.endsWith('.json') && !f.includes('.tmp.'));
+      
+      const sessions: PersistedSessionData[] = [];
+      
+      for (const file of sessionFiles) {
+        try {
+          const sessionPath = resolve(this.baseDir, file);
+          const data = await readFile(sessionPath, 'utf-8');
+          const sessionData: PersistedSessionData = JSON.parse(data);
+          sessions.push(sessionData);
+        } catch (error) {
+          // Skip corrupted session files but log the issue
+          console.warn(`Failed to load session file ${file}:`, error instanceof Error ? error.message : 'Unknown error');
+        }
+      }
+      
+      return sessions;
+    } catch (error) {
+      throw new Error(`Failed to get all sessions: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   private registerCleanupHandlers(): void {
     if (this.cleanupRegistered) return;
     this.cleanupRegistered = true;

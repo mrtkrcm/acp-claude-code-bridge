@@ -32,14 +32,32 @@ import type {
   DiffHunk,
   DiffChange,
   ResourceMetadata,
-  ToolCallBatch
+  ToolCallBatch,
+  SessionInfo,
+  ListSessionsRequest,
+  ListSessionsResponse
 } from "./types.js";
-import { MIME_TYPE_MAPPINGS } from "./types.js";
+import { 
+  MIME_TYPE_MAPPINGS,
+  validateListSessionsRequest,
+  validateNewSessionRequest,
+  validateLoadSessionRequest,
+  validatePromptRequest
+} from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
 import { SessionPersistenceManager, getDefaultPersistenceManager } from "./session-persistence.js";
 import { createLogger, type Logger } from "./logger.js";
 import { CircuitBreaker, CLAUDE_SDK_CIRCUIT_OPTIONS } from './circuit-breaker.js';
 import { globalResourceManager } from './resource-manager.js';
+import { 
+  getGlobalErrorHandler, 
+  handleResourceError,
+  wrapAsyncOperation
+} from './error-handler.js';
+import { 
+  getGlobalPerformanceMonitor, 
+  withPerformanceTracking 
+} from './performance-monitor.js';
 
 interface AgentSession {
   pendingPrompt: AsyncIterableIterator<SDKMessage> | null;
@@ -116,6 +134,10 @@ export class ClaudeACPAgent implements Agent {
   constructor(private client: Client) {
     // Validate configuration before initialization
     ClaudeACPAgent.validateConfig();
+
+    // Initialize global error handler and performance monitor
+    getGlobalErrorHandler();
+    getGlobalPerformanceMonitor();
 
     // Initialize configuration with validation
     this.maxTurns = this.parseMaxTurns();
@@ -349,10 +371,12 @@ export class ClaudeACPAgent implements Agent {
   }
 
   async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
-    this.logger.info("Creating new session");
+    // Validate input parameters
+    const validatedParams = validateNewSessionRequest(_params);
+    this.logger.info("Creating new session", { cwd: validatedParams.cwd, mcpServers: validatedParams.mcpServers?.length || 0 });
     
     if (!globalResourceManager.canStartOperation('new-session')) {
-      throw new Error('System resources exhausted - cannot create new session');
+      handleResourceError('System resources exhausted - cannot create new session', { operation: 'newSession' });
     }
 
     // Create a session ID - use UUID format for Zed compatibility
@@ -415,33 +439,35 @@ export class ClaudeACPAgent implements Agent {
   }
 
   async loadSession?(params: LoadSessionRequest): Promise<void> {
-    this.logger.info(`Loading session: ${params.sessionId}`, { sessionId: params.sessionId });
+    // Validate input parameters
+    const validatedParams = validateLoadSessionRequest(params);
+    this.logger.info(`Loading session: ${validatedParams.sessionId}`, { sessionId: validatedParams.sessionId });
 
     // Check if we already have this session in memory
-    const existingSession = this.sessions.get(params.sessionId);
+    const existingSession = this.sessions.get(validatedParams.sessionId);
     if (existingSession) {
       this.logger.debug(
-        `Session ${params.sessionId} already exists in memory with Claude session_id: ${existingSession.claudeSessionId}`,
+        `Session ${validatedParams.sessionId} already exists in memory with Claude session_id: ${existingSession.claudeSessionId}`,
         'DEBUG',
-        { sessionId: params.sessionId, claudeSessionId: existingSession.claudeSessionId }
+        { sessionId: validatedParams.sessionId, claudeSessionId: existingSession.claudeSessionId }
       );
       return;
     }
 
     // Try to load session from persistent storage
     try {
-      const persistedSession = await this.sessionPersistence.loadSession(params.sessionId);
+      const persistedSession = await this.sessionPersistence.loadSession(validatedParams.sessionId);
       
       if (persistedSession) {
-        this.logger.info(`Loaded session from persistence: ${params.sessionId}`, {
-          sessionId: params.sessionId,
+        this.logger.info(`Loaded session from persistence: ${validatedParams.sessionId}`, {
+          sessionId: validatedParams.sessionId,
           claudeSessionId: persistedSession.claudeSessionId,
           permissionMode: persistedSession.permissionMode,
           createdAt: persistedSession.createdAt
         });
         
         // Restore session state from persistence
-        this.sessions.set(params.sessionId, {
+        this.sessions.set(validatedParams.sessionId, {
           pendingPrompt: null,
           abortController: null,
           claudeSessionId: persistedSession.claudeSessionId,
@@ -454,7 +480,7 @@ export class ClaudeACPAgent implements Agent {
       }
     } catch (error) {
       this.logger.warn(`Failed to load session from persistence: ${error}`, {
-        sessionId: params.sessionId,
+        sessionId: validatedParams.sessionId,
         error: error instanceof Error ? error.message : String(error)
       });
     }
@@ -462,9 +488,9 @@ export class ClaudeACPAgent implements Agent {
     // Don't create a session in memory if it doesn't exist in persistence
     // This prevents phantom sessions from being created
     this.logger.debug(
-      `Session not found in persistence: ${params.sessionId}`,
+      `Session not found in persistence: ${validatedParams.sessionId}`,
       'DEBUG',
-      { sessionId: params.sessionId }
+      { sessionId: validatedParams.sessionId }
     );
   }
 
@@ -475,10 +501,90 @@ export class ClaudeACPAgent implements Agent {
     this.logger.debug("Using Claude Code authentication from ~/.claude/config.json");
   }
 
-  async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const currentSessionId = params.sessionId;
+  // Custom ACP extension: List available sessions
+  async listSessions(params: ListSessionsRequest = {}): Promise<ListSessionsResponse> {
+    let sessionCount = 0;
+    const response = await withPerformanceTracking('listSessions', async () => {
+      return await wrapAsyncOperation(async () => {
+        // Validate input parameters
+        const validatedParams = validateListSessionsRequest(params);
+        this.logger.debug("listSessions called", validatedParams);
+        
+        // Get persisted sessions
+        const persistedSessions = await this.sessionPersistence.getAllSessions();
+        
+        // Convert to SessionInfo format
+        const allSessions: SessionInfo[] = [];
+        
+        // Add persisted sessions
+        for (const persistedSession of persistedSessions) {
+          const isActive = this.sessions.has(persistedSession.sessionId);
+          
+          allSessions.push({
+            sessionId: persistedSession.sessionId,
+            createdAt: persistedSession.createdAt,
+            lastAccessed: persistedSession.lastAccessed,
+            permissionMode: (persistedSession.permissionMode as "default" | "acceptEdits" | "bypassPermissions" | "plan") || "default",
+            metadata: (persistedSession.metadata as { userAgent?: string; version?: string; platform?: string; clientVersion?: string; }) || {},
+            claudeSessionId: persistedSession.claudeSessionId,
+            status: isActive ? "active" : "persisted"
+          });
+        }
+        
+        // Add any in-memory sessions not yet persisted
+        for (const [sessionId, session] of this.sessions.entries()) {
+          const alreadyIncluded = allSessions.some(s => s.sessionId === sessionId);
+          if (!alreadyIncluded) {
+            allSessions.push({
+              sessionId,
+              createdAt: session.createdAt?.toISOString() || new Date().toISOString(),
+              lastAccessed: session.lastActivity?.toISOString() || new Date().toISOString(),
+              permissionMode: session.permissionMode || "default",
+              metadata: session.sessionMetadata || {},
+              claudeSessionId: session.claudeSessionId,
+              status: "active"
+            });
+          }
+        }
+
+        // Filter by status if specified
+        let filteredSessions = allSessions;
+        if (validatedParams.status && validatedParams.status !== "all") {
+          filteredSessions = allSessions.filter(session => session.status === validatedParams.status);
+        }
+
+        // Sort by lastAccessed descending (most recent first)
+        filteredSessions.sort((a, b) => 
+          new Date(b.lastAccessed).getTime() - new Date(a.lastAccessed).getTime()
+        );
+
+        // Apply pagination
+        const offset = validatedParams.offset || 0;
+        const limit = validatedParams.limit || 50;
+        const paginatedSessions = filteredSessions.slice(offset, offset + limit);
+        
+        const response: ListSessionsResponse = {
+          sessions: paginatedSessions,
+          total: filteredSessions.length,
+          hasMore: offset + limit < filteredSessions.length
+        };
+
+        sessionCount = response.total;
+        this.logger.debug(`Returning ${paginatedSessions.length} of ${filteredSessions.length} sessions`);
+        return response;
+      }, { operation: 'listSessions' });
+    }, undefined, { sessionCount });
     
-    return this.withSessionLock(currentSessionId, async () => {
+    return response;
+  }
+
+  async prompt(params: PromptRequest): Promise<PromptResponse> {
+    // Validate input parameters
+    const validatedParams = validatePromptRequest(params);
+    const currentSessionId = validatedParams.sessionId;
+    
+    return withPerformanceTracking('prompt', async () => {
+      return this.withSessionLock(currentSessionId, async () => {
       const session = this.getSession(currentSessionId);
 
       this.logger.debug(`Processing prompt for session: ${currentSessionId}`);
@@ -508,12 +614,13 @@ export class ClaudeACPAgent implements Agent {
         throw new Error('System resources exhausted - cannot process prompt');
       }
       
-      try {
-        return await this.executePrompt(params, session, currentSessionId);
-      } finally {
-        globalResourceManager.finishOperation(operationId);
-      }
-    });
+        try {
+          return await this.executePrompt(validatedParams, session, currentSessionId);
+        } finally {
+          globalResourceManager.finishOperation(operationId);
+        }
+      });
+    }, currentSessionId, { promptLength: validatedParams.prompt?.length });
   }
 
   /**

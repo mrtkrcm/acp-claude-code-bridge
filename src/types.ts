@@ -1,6 +1,12 @@
 // Re-export all types from the agent-client-protocol
 export * from "@zed-industries/agent-client-protocol";
 
+// Import Zod for runtime validation
+import { z } from 'zod';
+
+// Import ACP types for validation
+import type { NewSessionRequest, LoadSessionRequest, PromptRequest } from "@zed-industries/agent-client-protocol";
+
 // Claude Code SDK message types
 export interface ClaudeMessage {
   type: string;
@@ -209,6 +215,156 @@ export interface ToolPermissionConfig {
   disallowedTools?: string[]; // Explicit deny list
   toolPermissions?: Record<string, PermissionLevel>; // Per-tool permission levels
   defaultPermission?: PermissionLevel; // Default for unlisted tools
+}
+
+// Session listing types (custom ACP extension)
+export interface SessionInfo {
+  sessionId: string;
+  createdAt: string;
+  lastAccessed: string;
+  permissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
+  metadata: {
+    userAgent?: string;
+    version?: string;
+    platform?: string;
+    clientVersion?: string;
+  };
+  claudeSessionId?: string;
+  status: "active" | "inactive" | "persisted";
+}
+
+export interface ListSessionsRequest {
+  limit?: number;
+  offset?: number;
+  status?: "active" | "inactive" | "persisted" | "all";
+}
+
+export interface ListSessionsResponse {
+  sessions: SessionInfo[];
+  total: number;
+  hasMore: boolean;
+}
+
+// Zod validation schemas for runtime type checking
+export const PermissionModeSchema = z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan']);
+
+export const SessionStatusSchema = z.enum(['active', 'inactive', 'persisted']);
+
+export const SessionInfoSchema = z.object({
+  sessionId: z.string().uuid(),
+  createdAt: z.string().datetime(),
+  lastAccessed: z.string().datetime(),
+  permissionMode: PermissionModeSchema,
+  metadata: z.object({
+    userAgent: z.string().optional(),
+    version: z.string().optional(),
+    platform: z.string().optional(),
+    clientVersion: z.string().optional(),
+  }),
+  claudeSessionId: z.string().uuid().optional(),
+  status: SessionStatusSchema,
+});
+
+export const ListSessionsRequestSchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+  offset: z.number().int().min(0).optional(),
+  status: z.union([SessionStatusSchema, z.literal('all')]).optional(),
+});
+
+export const ListSessionsResponseSchema = z.object({
+  sessions: z.array(SessionInfoSchema),
+  total: z.number().int().min(0),
+  hasMore: z.boolean(),
+});
+
+// Common validation schemas
+export const SessionIdSchema = z.string().uuid();
+
+// Simplified validation schemas that match ACP protocol structure
+export const NewSessionRequestSchema = z.object({
+  cwd: z.string().min(1),
+  mcpServers: z.array(z.object({
+    name: z.string().min(1),
+    command: z.string().min(1),
+    args: z.array(z.string()).default([]),
+    env: z.array(z.object({
+      name: z.string(),
+      value: z.string(),
+    })).default([]),
+  })).default([]),
+});
+
+export const LoadSessionRequestSchema = z.object({
+  sessionId: SessionIdSchema,
+  cwd: z.string().min(1),
+  mcpServers: z.array(z.object({
+    name: z.string().min(1),
+    command: z.string().min(1),
+    args: z.array(z.string()).default([]),
+    env: z.array(z.object({
+      name: z.string(),
+      value: z.string(),
+    })).default([]),
+  })).default([]),
+});
+
+export const PromptRequestSchema = z.object({
+  sessionId: SessionIdSchema,
+  prompt: z.array(z.object({
+    type: z.string(),
+    text: z.string().optional(),
+  })).min(1),
+});
+
+// Validation helper functions - these perform basic validation and return the original types
+export function validateListSessionsRequest(data: unknown): ListSessionsRequest {
+  return ListSessionsRequestSchema.parse(data);
+}
+
+export function validateSessionId(sessionId: unknown): string {
+  if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
+    throw new Error('sessionId must be a non-empty string');
+  }
+  return sessionId;
+}
+
+export function validateNewSessionRequest(data: unknown): NewSessionRequest {
+  if (!data || typeof data !== 'object') {
+    throw new Error('NewSessionRequest must be an object');
+  }
+  const req = data as Record<string, unknown>;
+  if (!req.cwd || typeof req.cwd !== 'string' || req.cwd.trim().length === 0) {
+    throw new Error('cwd must be a non-empty string');
+  }
+  return data as NewSessionRequest;
+}
+
+export function validateLoadSessionRequest(data: unknown): LoadSessionRequest {
+  if (!data || typeof data !== 'object') {
+    throw new Error('LoadSessionRequest must be an object');
+  }
+  const req = data as Record<string, unknown>;
+  if (!req.sessionId || typeof req.sessionId !== 'string' || req.sessionId.trim().length === 0) {
+    throw new Error('sessionId must be a non-empty string');
+  }
+  if (!req.cwd || typeof req.cwd !== 'string' || req.cwd.trim().length === 0) {
+    throw new Error('cwd must be a non-empty string');
+  }
+  return data as LoadSessionRequest;
+}
+
+export function validatePromptRequest(data: unknown): PromptRequest {
+  if (!data || typeof data !== 'object') {
+    throw new Error('PromptRequest must be an object');
+  }
+  const req = data as Record<string, unknown>;
+  if (!req.sessionId || typeof req.sessionId !== 'string' || req.sessionId.trim().length === 0) {
+    throw new Error('sessionId must be a non-empty string');
+  }
+  if (!req.prompt || !Array.isArray(req.prompt) || req.prompt.length === 0) {
+    throw new Error('prompt must be a non-empty array');
+  }
+  return data as PromptRequest;
 }
 
 // MIME type mappings for content detection

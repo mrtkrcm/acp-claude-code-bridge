@@ -142,7 +142,10 @@ describe('Tool Permission System', () => {
   describe('Permission Request Decision', () => {
     beforeEach(async () => {
       // Set up a mock session
-      await agent.newSession({ sessionId: 'test-session' });
+      await agent.newSession({ 
+        cwd: process.cwd(),
+        mcpServers: []
+      });
     });
 
     it('should request permission for denied tools', async () => {
