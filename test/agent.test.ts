@@ -6,13 +6,15 @@ vi.mock('@anthropic-ai/claude-code', () => ({
   query: vi.fn()
 }))
 
-// Mock the ACP client
-const mockClient = {
+// Mock the ACP client with proper typing
+import type { Client } from '@zed-industries/agent-client-protocol';
+
+const mockClient: Client = {
   sessionUpdate: vi.fn(),
   readTextFile: vi.fn(),
   writeTextFile: vi.fn(),
   requestPermission: vi.fn()
-}
+} as Client;
 
 describe('ClaudeACPAgent', () => {
   let agent: ClaudeACPAgent
@@ -24,7 +26,7 @@ describe('ClaudeACPAgent', () => {
     delete process.env.ACP_PERMISSION_MODE
     delete process.env.ACP_DEBUG
     
-    agent = new ClaudeACPAgent(mockClient as any)
+    agent = new ClaudeACPAgent(mockClient)
   })
 
   describe('Initialization', () => {
@@ -64,7 +66,7 @@ describe('ClaudeACPAgent', () => {
     })
 
     it('should load existing session', async () => {
-      const sessionId = 'test-session-id'
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000' // Valid UUID
       
       // Should not throw error
       await expect(agent.loadSession?.({ 
@@ -78,30 +80,30 @@ describe('ClaudeACPAgent', () => {
   describe('Configuration Parsing', () => {
     it('should parse max turns from environment', () => {
       process.env.ACP_MAX_TURNS = '50'
-      const agent = new ClaudeACPAgent(mockClient as any)
+      const agent = new ClaudeACPAgent(mockClient)
       expect(agent).toBeDefined() // Agent should initialize successfully
     })
 
     it('should handle unlimited turns configuration', () => {
       process.env.ACP_MAX_TURNS = '0'
-      const agent = new ClaudeACPAgent(mockClient as any)
+      const agent = new ClaudeACPAgent(mockClient)
       expect(agent).toBeDefined()
     })
 
     it('should validate invalid max turns', () => {
       process.env.ACP_MAX_TURNS = 'invalid'
-      expect(() => new ClaudeACPAgent(mockClient as any)).toThrow()
+      expect(() => new ClaudeACPAgent(mockClient)).toThrow()
     })
 
     it('should parse permission modes', () => {
       process.env.ACP_PERMISSION_MODE = 'acceptEdits'
-      const agent = new ClaudeACPAgent(mockClient as any)
+      const agent = new ClaudeACPAgent(mockClient)
       expect(agent).toBeDefined()
     })
 
     it('should validate invalid permission modes', () => {
       process.env.ACP_PERMISSION_MODE = 'invalid'
-      expect(() => new ClaudeACPAgent(mockClient as any)).toThrow()
+      expect(() => new ClaudeACPAgent(mockClient)).toThrow()
     })
   })
 
@@ -114,7 +116,7 @@ describe('ClaudeACPAgent', () => {
 
   describe('Cancellation', () => {
     it('should handle cancel requests', async () => {
-      await expect(agent.cancel({ sessionId: 'test-session' })).resolves.toBeUndefined()
+      await expect(agent.cancel({ sessionId: '550e8400-e29b-41d4-a716-446655440001' })).resolves.toBeUndefined()
     })
   })
 

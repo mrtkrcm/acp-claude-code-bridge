@@ -19,6 +19,7 @@ export class Logger {
   private logBuffer: LogEntry[] = [];
   private flushTimer?: NodeJS.Timeout;
   private readonly BUFFER_SIZE = 50;
+  private readonly MAX_BUFFER_SIZE = 200; // Prevent memory leaks
   private readonly FLUSH_INTERVAL = 5000; // 5 seconds
 
   constructor(component: string, debugMode = false) {
@@ -78,8 +79,13 @@ export class Logger {
       consoleMethod(formattedMessage + argsStr);
     }
 
-    // File logging with buffering
+    // File logging with buffering and overflow protection
     if (this.fileLogger) {
+      // Prevent buffer overflow by removing old entries
+      if (this.logBuffer.length >= this.MAX_BUFFER_SIZE) {
+        this.logBuffer.shift(); // Remove oldest entry
+      }
+      
       this.logBuffer.push(entry);
       
       // Immediate flush for errors or if buffer is full
@@ -135,7 +141,13 @@ export class Logger {
     if (this.fileLogger) {
       const entries = this.logBuffer.splice(0); // Clear buffer
       const logText = entries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
-      this.fileLogger.write(logText);
+      
+      try {
+        this.fileLogger.write(logText);
+      } catch (error) {
+        // If write fails, clear buffer to prevent memory leak
+        console.error(`[${this.component}] Failed to write log buffer: ${error}`);
+      }
     }
     
     if (this.flushTimer) {

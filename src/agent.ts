@@ -212,10 +212,25 @@ export class ClaudeACPAgent implements Agent {
         },
       });
       
-      const messages = await this.claudeSDKCircuitBreaker.execute({
-        prompt: promptText,
-        options: queryOptions,
-      });
+      const operationId = `claude-query-${sessionId}-${Date.now()}`;
+      if (!globalResourceManager.startOperation(operationId)) {
+        throw new Error('System resources exhausted - cannot execute Claude query');
+      }
+      
+      let messages;
+      
+      try {
+        messages = await this.claudeSDKCircuitBreaker.execute({
+          prompt: promptText,
+          options: queryOptions,
+        });
+        
+        globalResourceManager.finishOperation(operationId);
+        // Continue with message processing
+      } catch (error) {
+        globalResourceManager.finishOperation(operationId);
+        throw error;
+      }
 
       session.pendingPrompt = messages as AsyncIterableIterator<SDKMessage>;
 

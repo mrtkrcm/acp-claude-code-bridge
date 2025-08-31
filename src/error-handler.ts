@@ -179,7 +179,7 @@ export class ACPErrorHandler {
   }
 }
 
-// Global error handler instance
+// Global error handler instance for backward compatibility
 let globalErrorHandler: ACPErrorHandler | null = null;
 
 export function getGlobalErrorHandler(): ACPErrorHandler {
@@ -190,7 +190,13 @@ export function getGlobalErrorHandler(): ACPErrorHandler {
 }
 
 export function resetGlobalErrorHandler(): void {
+  globalErrorHandler?.reset();
   globalErrorHandler = null;
+}
+
+// Factory function for dependency injection
+export function createErrorHandler(): ACPErrorHandler {
+  return new ACPErrorHandler();
 }
 
 // Convenience functions for common error patterns

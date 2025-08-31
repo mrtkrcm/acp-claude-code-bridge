@@ -108,52 +108,25 @@ export const PromptRequestSchema = z.object({
   })).min(1),
 });
 
-// Validation helper functions - these perform basic validation and return the original types
+// Validation helper functions using Zod schemas
 
 export function validateSessionId(sessionId: unknown): string {
-  if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
-    throw new Error('sessionId must be a non-empty string');
-  }
-  return sessionId;
+  return SessionIdSchema.parse(sessionId);
 }
 
 export function validateNewSessionRequest(data: unknown): NewSessionRequest {
-  if (!data || typeof data !== 'object') {
-    throw new Error('NewSessionRequest must be an object');
-  }
-  const req = data as Record<string, unknown>;
-  if (!req.cwd || typeof req.cwd !== 'string' || req.cwd.trim().length === 0) {
-    throw new Error('cwd must be a non-empty string');
-  }
-  return data as NewSessionRequest;
+  const validated = NewSessionRequestSchema.parse(data);
+  return validated as NewSessionRequest;
 }
 
 export function validateLoadSessionRequest(data: unknown): LoadSessionRequest {
-  if (!data || typeof data !== 'object') {
-    throw new Error('LoadSessionRequest must be an object');
-  }
-  const req = data as Record<string, unknown>;
-  if (!req.sessionId || typeof req.sessionId !== 'string' || req.sessionId.trim().length === 0) {
-    throw new Error('sessionId must be a non-empty string');
-  }
-  if (!req.cwd || typeof req.cwd !== 'string' || req.cwd.trim().length === 0) {
-    throw new Error('cwd must be a non-empty string');
-  }
-  return data as LoadSessionRequest;
+  const validated = LoadSessionRequestSchema.parse(data);
+  return validated as LoadSessionRequest;
 }
 
 export function validatePromptRequest(data: unknown): PromptRequest {
-  if (!data || typeof data !== 'object') {
-    throw new Error('PromptRequest must be an object');
-  }
-  const req = data as Record<string, unknown>;
-  if (!req.sessionId || typeof req.sessionId !== 'string' || req.sessionId.trim().length === 0) {
-    throw new Error('sessionId must be a non-empty string');
-  }
-  if (!req.prompt || !Array.isArray(req.prompt) || req.prompt.length === 0) {
-    throw new Error('prompt must be a non-empty array');
-  }
-  return data as PromptRequest;
+  const validated = PromptRequestSchema.parse(data);
+  return validated as PromptRequest;
 }
 
 // Essential MIME type mappings
