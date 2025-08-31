@@ -1,10 +1,9 @@
 import { AgentSideConnection } from "@zed-industries/agent-client-protocol";
-import { ClaudeACPAgent } from "./agent.js";
-import { DiagnosticSystem } from "./diagnostics.js";
 import { Writable, Readable } from "node:stream";
 import { WritableStream, ReadableStream } from "node:stream/web";
-import { createWriteStream } from "node:fs";
-import { resolve } from "node:path";
+import { ClaudeACPAgent } from "./agent.js";
+import { DiagnosticSystem } from "./diagnostics.js";
+import { createLogger } from "./logger.js";
 
 export async function main() {
   // Check for diagnostic mode first
@@ -26,41 +25,14 @@ export async function main() {
     process.exit(1);
   });
 
-  // Only log to stderr in debug mode
-  const DEBUG = process.env.ACP_DEBUG === "true";
-  const LOG_FILE = process.env.ACP_LOG_FILE;
+  // Initialize centralized logging
+  const logger = createLogger('ACP-Bridge');
+  logger.writeStartupMessage();
 
-  // Set up file logging if specified
-  let fileLogger: NodeJS.WritableStream | null = null;
-  if (LOG_FILE) {
-    try {
-      const logPath = resolve(LOG_FILE);
-      fileLogger = createWriteStream(logPath, { flags: 'a' }); // append mode
-      fileLogger.write(`\n=== ACP Bridge Started at ${new Date().toISOString()} ===\n`);
-    } catch (error) {
-      console.error(`[ACP-Claude] Failed to create log file ${LOG_FILE}: ${error}`);
-    }
-  }
-
-  const log = (message: string, level: 'INFO' | 'DEBUG' | 'ERROR' | 'WARN' = 'INFO') => {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] [${level}] [ACP-Claude] ${message}`;
-    
-    // Always log to stderr in debug mode
-    if (DEBUG) {
-      console.error(logMessage);
-    }
-    
-    // Log to file if configured
-    if (fileLogger) {
-      fileLogger.write(logMessage + '\n');
-    }
-  };
-
-  log("Starting Claude Code ACP Bridge...");
+  logger.info("Starting Claude Code ACP Bridge...");
 
   // Run pre-flight checks
-  await performPreflightChecks(log);
+  await performPreflightChecks(logger);
 
   try {
     // Prevent any accidental stdout writes that could corrupt the protocol
@@ -68,7 +40,7 @@ export async function main() {
       console.error("[WARNING] console.log intercepted:", ...args);
     };
 
-    log("Creating ACP connection via stdio...");
+    logger.debug("Creating ACP connection via stdio...");
 
     // Convert Node.js streams to Web Streams
     // IMPORTANT: stdout is for sending to client, stdin is for receiving from client
@@ -84,7 +56,7 @@ export async function main() {
     let agent: ClaudeACPAgent | null = null;
     new AgentSideConnection(
       (client) => {
-        log("Creating ClaudeACPAgent with client", 'DEBUG');
+        logger.debug("Creating ClaudeACPAgent with client");
         agent = new ClaudeACPAgent(client);
         return agent;
       },
@@ -93,65 +65,47 @@ export async function main() {
     );
 
     // Log connection creation success
-    log("ACP Connection created successfully", 'DEBUG');
+    logger.debug("ACP Connection created successfully");
 
-    log("Claude Code ACP Bridge is running");
+    logger.info("Claude Code ACP Bridge is running");
 
     // Keep the process alive
     process.stdin.resume();
 
     // Handle graceful shutdown
     process.on("SIGINT", () => {
-      log("Received SIGINT, shutting down...", 'INFO');
+      logger.info("Received SIGINT, shutting down...");
       if (agent && typeof agent.destroy === 'function') {
         agent.destroy();
       }
-      if (fileLogger) {
-        fileLogger.write(`=== ACP Bridge Stopped at ${new Date().toISOString()} ===\n`);
-        fileLogger.end();
-      }
+      logger.destroy();
       process.exit(0);
     });
 
     process.on("SIGTERM", () => {
-      log("Received SIGTERM, shutting down...", 'INFO');
+      logger.info("Received SIGTERM, shutting down...");
       if (agent && typeof agent.destroy === 'function') {
         agent.destroy();
       }
-      if (fileLogger) {
-        fileLogger.write(`=== ACP Bridge Stopped at ${new Date().toISOString()} ===\n`);
-        fileLogger.end();
-      }
+      logger.destroy();
       process.exit(0);
     });
 
     // Handle uncaught errors
     process.on("uncaughtException", (error) => {
-      const errorMsg = `[FATAL] Uncaught exception: ${error.message}\nStack: ${error.stack}`;
-      console.error(errorMsg);
-      if (fileLogger) {
-        fileLogger.write(`${errorMsg}\n`);
-        fileLogger.end();
-      }
+      logger.error(`[FATAL] Uncaught exception: ${error.message}`, { stack: error.stack });
+      logger.destroy();
       process.exit(1);
     });
 
     process.on("unhandledRejection", (reason, promise) => {
-      const errorMsg = `[FATAL] Unhandled rejection at: ${promise}, reason: ${reason}`;
-      console.error(errorMsg);
-      if (fileLogger) {
-        fileLogger.write(`${errorMsg}\n`);
-        fileLogger.end();
-      }
+      logger.error(`[FATAL] Unhandled rejection`, { promise: String(promise), reason: String(reason) });
+      logger.destroy();
       process.exit(1);
     });
   } catch (error) {
-    const errorMsg = `[FATAL] Error starting ACP bridge: ${error}`;
-    console.error(errorMsg);
-    if (fileLogger) {
-      fileLogger.write(`${errorMsg}\n`);
-      fileLogger.end();
-    }
+    logger.error(`[FATAL] Error starting ACP bridge: ${error}`);
+    logger.destroy();
     process.exit(1);
   }
 }
@@ -173,7 +127,7 @@ async function runDiagnostics(): Promise<void> {
   }
 }
 
-async function performPreflightChecks(log: (message: string) => void): Promise<void> {
+async function performPreflightChecks(logger: ReturnType<typeof createLogger>): Promise<void> {
   try {
     const report = await DiagnosticSystem.generateReport();
     
@@ -198,13 +152,13 @@ async function performPreflightChecks(log: (message: string) => void): Promise<v
     // Log warnings for non-optimal conditions
     const warnings = report.issues.filter(issue => issue.level === 'warning');
     if (warnings.length > 0 && process.env.ACP_DEBUG === "true") {
-      log(`Found ${warnings.length} non-critical warnings. Run --diagnose for details.`);
+      logger.debug(`Found ${warnings.length} non-critical warnings. Run --diagnose for details.`);
     }
     
-    log(`Compatibility score: ${report.score}/100`);
+    logger.debug(`Compatibility score: ${report.score}/100`);
     
   } catch (error) {
-    log(`Preflight check failed: ${error}`);
+    logger.warn(`Preflight check failed: ${error}`);
     // Continue anyway - don't block on diagnostic failures
   }
 }

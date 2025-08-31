@@ -27,12 +27,9 @@ export class ContextMonitor {
   private readonly WARNING_THRESHOLD = 0.8;
   private readonly CRITICAL_THRESHOLD = 0.95;
 
-  constructor(private debug: boolean = false) {}
-
-  private log(message: string): void {
-    if (this.debug) {
-      console.error(`[ContextMonitor] ${message}`);
-    }
+  constructor(_debugMode = false) {
+    // Debug mode parameter maintained for compatibility but not used
+    // Logging is handled by individual components now
   }
 
   private estimateTokens(text: string): number {
