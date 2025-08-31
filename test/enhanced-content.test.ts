@@ -257,6 +257,32 @@ describe('Enhanced Content Block Support', () => {
       expect(result[0].type).toBe('content');
       expect(result[0].content.type).toBe('text');
     });
+
+    it('should enhance WebSearch output with metadata', async () => {
+      // Bind the method properly
+      const processToolOutputContent = (agent as any).processToolOutputContent.bind(agent);
+      
+      const searchOutput = 'Found 5 results for "TypeScript tutorial"\nhttps://www.typescriptlang.org/docs\nhttps://github.com/microsoft/TypeScript';
+      const result = await processToolOutputContent(searchOutput, 'WebSearch');
+      
+      expect(result).toHaveLength(1);
+      expect(result[0].content.text).toContain('[◊] Web Search Results');
+      expect(result[0].content.text).toContain('5 results');
+      expect(result[0].content.text).toContain('typescriptlang.org');
+    });
+
+    it('should enhance WebFetch output with content info', async () => {
+      // Bind the method properly
+      const processToolOutputContent = (agent as any).processToolOutputContent.bind(agent);
+      
+      const fetchOutput = 'Fetched content from https://example.com/api\nContent-Type: application/json\n{"data": "example"}';
+      const result = await processToolOutputContent(fetchOutput, 'WebFetch');
+      
+      expect(result).toHaveLength(1);
+      expect(result[0].content.text).toContain('[⬇] Web Content Fetched');
+      expect(result[0].content.text).toContain('from example.com');
+      expect(result[0].content.text).toContain('JSON');
+    });
   });
 
   describe('File Operation Detection', () => {

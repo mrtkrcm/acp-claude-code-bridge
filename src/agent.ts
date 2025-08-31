@@ -1570,6 +1570,162 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
+   * Enhance WebSearch and WebFetch output with metadata and formatting.
+   */
+  private enhanceWebContent(outputText: string, toolName: string): string {
+    try {
+      // Try to extract structured information from web content
+      const lines = outputText.split('\n');
+      const firstLine = lines[0] || '';
+      
+      if (toolName === 'WebSearch') {
+        // Look for search result patterns
+        const resultCount = this.extractSearchResultCount(outputText);
+        const domains = this.extractDomains(outputText);
+        const queries = this.extractSearchQueries(outputText);
+        
+        let header = '[◊] Web Search Results';
+        const metadata: string[] = [];
+        
+        if (resultCount) metadata.push(`${resultCount} results`);
+        if (queries.length > 0) metadata.push(`Query: "${queries[0]}"`);
+        if (domains.length > 0) metadata.push(`Domains: ${domains.slice(0, 3).join(', ')}${domains.length > 3 ? '...' : ''}`);
+        
+        if (metadata.length > 0) {
+          header += ` [${metadata.join(' • ')}]`;
+        }
+        
+        return `${header}\n${outputText}`;
+        
+      } else if (toolName === 'WebFetch') {
+        // Look for URL and content type patterns
+        const url = this.extractUrl(outputText);
+        const contentType = this.extractContentType(outputText);
+        const wordCount = this.extractWordCount(outputText);
+        
+        let header = '[⬇] Web Content Fetched';
+        const metadata: string[] = [];
+        
+        if (url) {
+          const domain = new URL(url).hostname;
+          metadata.push(`from ${domain}`);
+        }
+        if (contentType) metadata.push(`${contentType}`);
+        if (wordCount) metadata.push(`${wordCount} words`);
+        
+        if (metadata.length > 0) {
+          header += ` [${metadata.join(' • ')}]`;
+        }
+        
+        return `${header}\n${outputText}`;
+      }
+      
+    } catch (error) {
+      this.logger.warn(`Error enhancing web content: ${error}`);
+    }
+    
+    // Fallback to simple enhancement
+    const icon = toolName === 'WebSearch' ? '[◊]' : '[⬇]';
+    const action = toolName === 'WebSearch' ? 'Search Results' : 'Content Fetched';
+    return `${icon} ${action}\n${outputText}`;
+  }
+
+  /**
+   * Extract search result count from search output.
+   */
+  private extractSearchResultCount(text: string): string | null {
+    const patterns = [
+      /(\d+)\s+results?/i,
+      /found\s+(\d+)/i,
+      /(\d+)\s+matches?/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  /**
+   * Extract domains from web content.
+   */
+  private extractDomains(text: string): string[] {
+    const domainPattern = /https?:\/\/([^\/\s]+)/g;
+    const domains = new Set<string>();
+    let match;
+    
+    while ((match = domainPattern.exec(text)) !== null) {
+      domains.add(match[1]);
+    }
+    
+    return Array.from(domains);
+  }
+
+  /**
+   * Extract search queries from search output.
+   */
+  private extractSearchQueries(text: string): string[] {
+    const patterns = [
+      /query[:\s]+["']([^"']+)["']/i,
+      /search[:\s]+["']([^"']+)["']/i,
+      /searching for[:\s]+["']([^"']+)["']/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return [match[1]];
+    }
+    
+    return [];
+  }
+
+  /**
+   * Extract URL from web fetch output.
+   */
+  private extractUrl(text: string): string | null {
+    const urlPattern = /https?:\/\/[^\s]+/;
+    const match = text.match(urlPattern);
+    return match ? match[0] : null;
+  }
+
+  /**
+   * Extract content type from web fetch output.
+   */
+  private extractContentType(text: string): string | null {
+    const patterns = [
+      /content-type[:\s]+([^;\n]+)/i,
+      /type[:\s]+([^;\n\s]+)/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        const type = match[1].trim();
+        if (type.includes('html')) return 'HTML';
+        if (type.includes('json')) return 'JSON';
+        if (type.includes('xml')) return 'XML';
+        if (type.includes('text')) return 'Text';
+        return type;
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Extract word count estimate from content.
+   */
+  private extractWordCount(text: string): string | null {
+    // Simple word count estimation
+    const words = text.split(/\s+/).length;
+    if (words < 50) return null; // Too small to be meaningful
+    
+    if (words > 1000) return `${Math.round(words / 100) / 10}K`;
+    return words.toString();
+  }
+
+  /**
    * Generate system message banner for task progress with clear agent identification.
    */
   private generateTaskProgressDisplay(
@@ -2288,6 +2444,11 @@ export class ClaudeACPAgent implements Agent {
         if (resourceInfo && resourceInfo.type === "resource_link") {
           enhancedText = `[+] ${resourceInfo.description || `File: ${resourceInfo.name}`}\n${outputText}`;
         }
+      }
+      
+      // Check for WebSearch/WebFetch content
+      else if (toolName === 'WebSearch' || toolName === 'WebFetch') {
+        enhancedText = this.enhanceWebContent(outputText, toolName);
       }
       
       // Check for diff content
