@@ -210,16 +210,18 @@ export class ClaudeACPAgent implements Agent {
     const heapMB = Math.round(usage.heapUsed / 1024 / 1024);
     const rss = Math.round(usage.rss / 1024 / 1024);
     
-    // Log memory stats every hour
+    // Dynamic thresholds based on system memory (fallback to defaults)
+    const totalMemMB = Math.round(require('os').totalmem() / 1024 / 1024);
+    const warnThreshold = Math.min(totalMemMB * 0.05, 500) * 1024 * 1024; // 5% of system or 500MB max
+    const criticalThreshold = Math.min(totalMemMB * 0.1, 1024) * 1024 * 1024; // 10% of system or 1GB max
+    
     this.logger.debug(`Memory usage: ${heapMB}MB heap, ${rss}MB RSS`);
     
-    // Warn on high usage
-    if (usage.heapUsed > 500 * 1024 * 1024) { // 500MB
+    if (usage.heapUsed > warnThreshold) {
       this.logger.warn(`High memory usage detected: ${heapMB}MB heap`);
     }
     
-    // Critical memory warning
-    if (usage.heapUsed > 1024 * 1024 * 1024) { // 1GB
+    if (usage.heapUsed > criticalThreshold) {
       this.logger.error(`Critical memory usage: ${heapMB}MB heap - consider restart`);
     }
   }
@@ -379,7 +381,7 @@ export class ClaudeACPAgent implements Agent {
         lastAccessed: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
-          version: '0.10.0'
+          version: '0.13.1'
         }
       });
     } catch (error) {
@@ -457,19 +459,12 @@ export class ClaudeACPAgent implements Agent {
       });
     }
 
-    // Create a new session entry if not found in persistence
-    // This handles the case where the agent restarts but Zed still has the session ID
-    this.sessions.set(params.sessionId, {
-      pendingPrompt: null,
-      abortController: null,
-      claudeSessionId: undefined,
-      permissionMode: this.defaultPermissionMode,
-    });
-
+    // Don't create a session in memory if it doesn't exist in persistence
+    // This prevents phantom sessions from being created
     this.logger.debug(
-      `Created new session entry for loaded session: ${params.sessionId}`,
-      'INFO',
-      { sessionId: params.sessionId, permissionMode: this.defaultPermissionMode }
+      `Session not found in persistence: ${params.sessionId}`,
+      'DEBUG',
+      { sessionId: params.sessionId }
     );
   }
 
@@ -1762,7 +1757,7 @@ export class ClaudeACPAgent implements Agent {
     }
     
     // Format as system message banner for clear agent identification
-    return `> [!NOTE] ◈ Agent Task Progress\n> ${taskStatus}`;
+    return `> ◈ Agent Task Progress\n> ${taskStatus}`;
   }
 
   /**
