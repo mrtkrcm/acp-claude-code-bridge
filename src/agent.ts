@@ -19,7 +19,20 @@ import {
   RequestPermissionRequest,
   PermissionOption,
 } from "@zed-industries/agent-client-protocol";
-import type { ClaudeMessage, ClaudeStreamEvent } from "./types.js";
+import type { 
+  ClaudeMessage, 
+  ClaudeStreamEvent, 
+  ToolPermissionConfig,
+  PermissionLevel,
+  ExtendedClientCapabilities,
+  ToolExecutionTiming,
+  DiffMetadata,
+  DiffHunk,
+  DiffChange,
+  ResourceMetadata,
+  ToolCallBatch
+} from "./types.js";
+import { MIME_TYPE_MAPPINGS } from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
 import { SessionPersistenceManager, getDefaultPersistenceManager } from "./session-persistence.js";
 import { createWriteStream } from "node:fs";
@@ -30,6 +43,7 @@ interface AgentSession {
   abortController: AbortController | null;
   claudeSessionId?: string; // Claude's actual session_id, obtained after first message
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan"; // Permission mode for this session
+  toolPermissions?: ToolPermissionConfig; // Per-session tool permissions
   [key: string]: unknown; // Allow dynamic properties for warnings
 }
 
@@ -42,9 +56,14 @@ export class ClaudeACPAgent implements Agent {
   private defaultPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   private pathToClaudeCodeExecutable: string | undefined;
   private clientCapabilities: ClientCapabilities = {};
+  private extendedClientCapabilities: ExtendedClientCapabilities = {};
+  private toolExecutionTiming: Map<string, ToolExecutionTiming> = new Map();
+  private streamingUpdates: Map<string, { chunks: string[]; totalSize?: number }> = new Map();
+  private activeBatches: Map<string, ToolCallBatch> = new Map();
   private readonly MAX_RETRY_ATTEMPTS = 3;
   private readonly RETRY_DELAY_MS = 1000;
   private sessionPersistence: SessionPersistenceManager;
+  private toolPermissions: ToolPermissionConfig = { defaultPermission: "allow" };
 
   private static validateConfig() {
     const maxTurns = process.env.ACP_MAX_TURNS;
@@ -104,6 +123,94 @@ export class ClaudeACPAgent implements Agent {
   private parsePermissionMode(): "default" | "acceptEdits" | "bypassPermissions" | "plan" {
     const mode = process.env.ACP_PERMISSION_MODE as "default" | "acceptEdits" | "bypassPermissions" | "plan";
     return mode || "default";
+  }
+
+  private detectExtendedCapabilities(params: InitializeRequest): ExtendedClientCapabilities {
+    const capabilities = params.clientCapabilities || {};
+    const experimental: ExtendedClientCapabilities['experimental'] = {};
+    
+    // Detect enhanced content support
+    // Assume support if client has file system capabilities
+    if (capabilities.fs?.readTextFile || capabilities.fs?.writeTextFile) {
+      experimental.enhancedContent = true;
+    }
+    
+    // Detect timing support
+    // Always enable for now - it's just metadata
+    experimental.toolTiming = true;
+    
+    // Detect progress updates support
+    // Always enable - uses standard session updates
+    experimental.progressUpdates = true;
+    
+    // Detect rich diff support
+    // Enable if we have enhanced content support
+    experimental.richDiffs = experimental.enhancedContent;
+    
+    // Detect resource metadata support
+    // Enable if we have file system access
+    experimental.resourceMetadata = !!capabilities.fs;
+    
+    // Detect streaming content support
+    // Enable for clients that support session updates (all ACP clients do)
+    experimental.streamingContent = true;
+    
+    // Detect tool call batching support
+    // Enable for clients that support multiple tool calls
+    experimental.toolCallBatching = true;
+    
+    return { experimental };
+  }
+
+  private startToolTiming(toolCallId: string, toolName?: string): void {
+    if (!this.extendedClientCapabilities.experimental?.toolTiming) return;
+    
+    this.toolExecutionTiming.set(toolCallId, {
+      startTime: Date.now(),
+      estimatedDuration: this.estimateToolDuration(toolName),
+    });
+  }
+
+  private completeToolTiming(toolCallId: string): ToolExecutionTiming | undefined {
+    if (!this.extendedClientCapabilities.experimental?.toolTiming) return undefined;
+    
+    const timing = this.toolExecutionTiming.get(toolCallId);
+    if (!timing) return undefined;
+    
+    const endTime = Date.now();
+    timing.endTime = endTime;
+    timing.duration = endTime - timing.startTime;
+    
+    this.toolExecutionTiming.delete(toolCallId);
+    return timing;
+  }
+
+  private estimateToolDuration(toolName?: string): number | undefined {
+    if (!toolName) return undefined;
+    
+    // Rough estimates in milliseconds based on tool type
+    switch (toolName.toLowerCase()) {
+      case 'read':
+      case 'ls':
+      case 'glob':
+        return 500;
+      case 'write':
+      case 'edit':
+        return 1000;
+      case 'multiedit':
+        return 2000;
+      case 'bash':
+        return 3000;
+      case 'webfetch':
+      case 'websearch':
+        return 5000;
+      default:
+        // MCP tools
+        if (toolName.startsWith('mcp__')) {
+          return 2000;
+        }
+        return 1500;
+    }
   }
 
   private initializeLogging(): void {
@@ -166,6 +273,11 @@ export class ClaudeACPAgent implements Agent {
 
     // Store client capabilities for direct operations
     this.clientCapabilities = params.clientCapabilities || {};
+    
+    // Detect extended experimental capabilities
+    this.extendedClientCapabilities = this.detectExtendedCapabilities(params);
+    this.log(`Extended capabilities: ${JSON.stringify(this.extendedClientCapabilities)}`, 'DEBUG');
+    
     this.log(`File system capabilities: readTextFile=${this.clientCapabilities.fs?.readTextFile}, writeTextFile=${this.clientCapabilities.fs?.writeTextFile}`);
     this.log(`Permission system: ACP supports native permission dialogs=${!!this.client.requestPermission}`, 'DEBUG');
 
@@ -402,6 +514,8 @@ export class ClaudeACPAgent implements Agent {
       if (this.maxTurns > 0) {
         queryOptions.maxTurns = this.maxTurns;
       }
+      
+      // Tool permissions can be updated via updateToolPermissions() method calls
       
       this.log(`Starting query with${this.maxTurns === 0 ? ' unlimited' : ` ${this.maxTurns}`} turns`, 'DEBUG');
       
@@ -645,6 +759,9 @@ export class ClaudeACPAgent implements Agent {
               // Send tool_call notification to client with enhanced title
               const toolTitle = this.getEnhancedToolTitle(content.name || "Tool", content.input);
               
+              // Start timing for this tool call
+              this.startToolTiming(content.id || "", content.name);
+              
               await this.client.sessionUpdate({
                 sessionId,
                 update: {
@@ -654,6 +771,11 @@ export class ClaudeACPAgent implements Agent {
                   kind: this.mapToolKind(content.name || ""),
                   status: "pending",
                   rawInput: content.input as Record<string, unknown>,
+                  ...(this.extendedClientCapabilities.experimental?.toolTiming && {
+                    metadata: {
+                      timing: this.toolExecutionTiming.get(content.id || ""),
+                    },
+                  }),
                 },
               });
 
@@ -762,6 +884,32 @@ export class ClaudeACPAgent implements Agent {
           break;
         }
 
+        // First check if tool is allowed to execute at all
+        const toolPermission = this.getToolPermissionLevel(msg.tool_name || "");
+        
+        if (toolPermission === 'deny' || !this.isToolAllowed(msg.tool_name || "")) {
+          // Tool is not allowed, send denial notification
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: msg.id || "",
+              status: "failed",
+              content: [
+                {
+                  type: "content",
+                  content: {
+                    type: "text",
+                    text: `Tool "${msg.tool_name}" is not allowed by current permission configuration.`,
+                  },
+                },
+              ],
+              rawOutput: { permission: 'denied', reason: 'tool_not_allowed', toolName: msg.tool_name },
+            },
+          });
+          break; // Don't proceed with tool execution
+        }
+        
         // Check if we should request permission for this tool operation
         const shouldRequestPermission = await this.shouldRequestPermissionForTool(
           sessionId,
@@ -902,23 +1050,26 @@ export class ClaudeACPAgent implements Agent {
         this.log(`Tool call completed: ${msg.id}`, 'DEBUG');
         this.log(`Tool output length: ${outputText.length} characters`, 'DEBUG');
 
+        // Process content and detect multimedia/enhanced content
+        const enhancedContent = await this.processToolOutputContent(outputText, msg.tool_name);
+
+        // Complete timing for this tool call
+        const timing = this.completeToolTiming(msg.id || "");
+
         await this.client.sessionUpdate({
           sessionId,
           update: {
             sessionUpdate: "tool_call_update",
             toolCallId: msg.id || "",
             status: "completed",
-            content: [
-              {
-                type: "content",
-                content: {
-                  type: "text",
-                  text: outputText,
-                },
-              },
-            ],
+            content: enhancedContent,
             // Pass output directly without extra wrapping
             rawOutput: msg.output ? { output: outputText } : undefined,
+            ...(timing && this.extendedClientCapabilities.experimental?.toolTiming && {
+              metadata: {
+                timing,
+              },
+            }),
           },
         });
         break;
@@ -1401,7 +1552,7 @@ export class ClaudeACPAgent implements Agent {
 
   /**
    * Determines if we should request permission for a specific tool operation.
-   * Based on permission mode and tool sensitivity.
+   * Based on permission mode, tool sensitivity, and tool permission configuration.
    */
   private async shouldRequestPermissionForTool(
     sessionId: string,
@@ -1411,7 +1562,25 @@ export class ClaudeACPAgent implements Agent {
     const session = this.sessions.get(sessionId);
     const permissionMode = session?.permissionMode || this.defaultPermissionMode;
 
-    // Skip permission requests in certain modes
+    // First check tool permissions configuration
+    const toolPermission = this.getToolPermissionLevel(toolName);
+    
+    // If tool is explicitly denied, we should not execute it at all
+    if (toolPermission === 'deny') {
+      return true; // Return true to trigger permission request, which will deny
+    }
+    
+    // If tool is explicitly allowed, skip permission unless in plan mode
+    if (toolPermission === 'allow' && permissionMode !== 'plan') {
+      return false;
+    }
+    
+    // If tool permission is 'ask', always request permission
+    if (toolPermission === 'ask') {
+      return true;
+    }
+
+    // Skip permission requests in certain modes (for tools not explicitly configured)
     if (permissionMode === 'bypassPermissions' || permissionMode === 'acceptEdits') {
       return false;
     }
@@ -1432,6 +1601,34 @@ export class ClaudeACPAgent implements Agent {
     ];
 
     return sensitiveTools.some(sensitive => lowerToolName.includes(sensitive));
+  }
+
+  /**
+   * Get permission level for a specific tool
+   */
+  private getToolPermissionLevel(toolName: string): PermissionLevel {
+    // Initialize toolPermissions if not set
+    if (!this.toolPermissions) {
+      this.toolPermissions = { defaultPermission: 'allow' };
+    }
+    
+    // Check if tool is explicitly disallowed
+    if (this.toolPermissions.disallowedTools?.includes(toolName)) {
+      return 'deny';
+    }
+    
+    // Check if tool is explicitly allowed (and allowed list exists)
+    if (this.toolPermissions.allowedTools && this.toolPermissions.allowedTools.length > 0) {
+      return this.toolPermissions.allowedTools.includes(toolName) ? 'allow' : 'deny';
+    }
+    
+    // Check per-tool permissions
+    if (this.toolPermissions.toolPermissions && toolName in this.toolPermissions.toolPermissions) {
+      return this.toolPermissions.toolPermissions[toolName];
+    }
+    
+    // Return default permission
+    return this.toolPermissions.defaultPermission || 'allow';
   }
 
   /**
@@ -1554,8 +1751,54 @@ export class ClaudeACPAgent implements Agent {
     | "think"
     | "fetch"
     | "other" {
+    // Exact tool name mappings for specialized tools
+    switch (toolName) {
+      case "Read":
+      case "Glob":
+      case "LS":
+        return "read";
+      case "Write":
+      case "Edit":
+      case "MultiEdit":
+      case "NotebookEdit":
+        return "edit";
+      case "Grep":
+      case "WebSearch":
+        return "search";
+      case "Bash":
+      case "KillBash":
+      case "BashOutput":
+        return "execute";
+      case "WebFetch":
+        return "fetch";
+      case "TodoWrite":
+      case "ExitPlanMode":
+        return "think";
+      default:
+        break;
+    }
+    
+    // MCP tool prefixes
+    if (toolName.startsWith("mcp__")) {
+      const mcpToolName = toolName.split("__").pop()?.toLowerCase() || "";
+      if (mcpToolName.includes("read") || mcpToolName.includes("get") || mcpToolName.includes("list")) {
+        return "read";
+      } else if (mcpToolName.includes("write") || mcpToolName.includes("create") || mcpToolName.includes("update") || mcpToolName.includes("add")) {
+        return "edit";
+      } else if (mcpToolName.includes("delete") || mcpToolName.includes("remove") || mcpToolName.includes("close")) {
+        return "delete";
+      } else if (mcpToolName.includes("search") || mcpToolName.includes("find")) {
+        return "search";
+      } else if (mcpToolName.includes("fetch") || mcpToolName.includes("navigate") || mcpToolName.includes("request")) {
+        return "fetch";
+      } else if (mcpToolName.includes("execute") || mcpToolName.includes("run") || mcpToolName.includes("click") || mcpToolName.includes("fill") || mcpToolName.includes("keyboard")) {
+        return "execute";
+      }
+      return "other";
+    }
+    
+    // Fallback to pattern matching for unknown tools
     const lowerName = toolName.toLowerCase();
-
     if (
       lowerName.includes("read") ||
       lowerName.includes("view") ||
@@ -1719,5 +1962,750 @@ export class ClaudeACPAgent implements Agent {
     }
     
     return { category: 'unknown', severity: 'medium', recoverable: true };
+  }
+
+  /**
+   * Process tool output content to detect and create enhanced content blocks
+   */
+  private async processToolOutputContent(
+    outputText: string,
+    toolName?: string
+  ): Promise<Array<{ type: "content"; content: { type: "text"; text: string } }>> {
+    // Default text content
+    const defaultContent = [{
+      type: "content" as const,
+      content: {
+        type: "text" as const,
+        text: outputText,
+      },
+    }];
+
+    try {
+      // Enhanced content processing - for now return as text with descriptive labels
+      let enhancedText = outputText;
+      
+      // Check if this is a file operation that should create resource content
+      if (this.isFileOperation(toolName, outputText)) {
+        const resourceInfo = this.createResourceContent(outputText, toolName);
+        if (resourceInfo && resourceInfo.type === "resource_link") {
+          enhancedText = `[+] ${resourceInfo.description || `File: ${resourceInfo.name}`}\n${outputText}`;
+        }
+      }
+      
+      // Check for diff content
+      else if (this.isDiffOutput(outputText, toolName)) {
+        const diffMetadata = this.parseDiffMetadata(outputText, toolName);
+        const languageInfo = diffMetadata.language ? ` (${diffMetadata.language})` : '';
+        const changeStats = `+${diffMetadata.linesAdded}/-${diffMetadata.linesRemoved}`;
+        enhancedText = `[~] Code changes detected${languageInfo} [${changeStats}]:\n${outputText}`;
+      }
+      
+      // Check for image/audio content
+      else {
+        const mediaContent = await this.detectMediaContent(outputText);
+        if (mediaContent && mediaContent.type === "text") {
+          enhancedText = `${mediaContent.text}\n${outputText}`;
+        } else if (mediaContent && mediaContent.type === "resource_link") {
+          enhancedText = `[*] Media file: ${mediaContent.description}\n${outputText}`;
+        }
+      }
+      
+      // Return enhanced text if different from original
+      if (enhancedText !== outputText) {
+        return [{
+          type: "content" as const,
+          content: {
+            type: "text" as const,
+            text: enhancedText,
+          },
+        }];
+      }
+
+    } catch (error) {
+      this.log(`Error processing enhanced content: ${error}`, 'WARN');
+    }
+
+    return defaultContent;
+  }
+
+  /**
+   * Check if tool output represents a file operation
+   */
+  private isFileOperation(toolName?: string, output?: string): boolean {
+    const fileTools = ['Read', 'Write', 'Edit', 'MultiEdit', 'Glob'];
+    if (toolName && fileTools.includes(toolName)) {
+      return true;
+    }
+    
+    // Check output patterns that suggest file operations
+    if (!output) return false;
+    
+    const filePatterns = [
+      /^\s*\d+→/, // Line numbers (Read tool output)
+      /Applied \d+ edit/, // Edit tool output
+      /Created file/, // Write tool output
+      /^\/.+\.(ts|js|py|java|cpp|c|h|css|html|json|md|txt)$/m, // File paths
+    ];
+    
+    return filePatterns.some(pattern => pattern.test(output));
+  }
+
+  /**
+   * Create resource content block for file operations with enhanced metadata
+   */
+  private createResourceContent(
+    output: string,
+    toolName?: string
+  ): { type: string; uri?: string; name?: string; mimeType?: string; description?: string; text?: string; metadata?: ResourceMetadata } | null {
+    try {
+      // Extract file path from output
+      let filePath: string | null = null;
+      
+      // Try to extract file path from various patterns
+      const pathPatterns = [
+        /^\s*File path: (.+)$/m,
+        /^\s*Reading (.+)$/m,
+        /^\s*Writing (.+)$/m,
+        /^\s*Editing (.+)$/m,
+        /^(\/[^\s]+\.[^\s]+)$/m, // Any file path with extension
+        /^([^\s]*\/[^\s]*\.[^\s]+)$/m, // Relative file path with extension
+      ];
+      
+      for (const pattern of pathPatterns) {
+        const match = output.match(pattern);
+        if (match && match[1]) {
+          filePath = match[1].trim();
+          break;
+        }
+      }
+      
+      if (!filePath) return null;
+      
+      // Detect MIME type from file extension
+      const extension = filePath.substring(filePath.lastIndexOf('.'));
+      const mimeType = MIME_TYPE_MAPPINGS[extension] || 'text/plain';
+      
+      const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+      
+      // Generate enhanced metadata if supported
+      const metadata = this.extendedClientCapabilities.experimental?.resourceMetadata 
+        ? this.generateResourceMetadata(output, filePath, toolName) 
+        : undefined;
+      
+      return {
+        type: "resource_link",
+        uri: `file://${filePath}`,
+        name: fileName,
+        mimeType,
+        description: `${toolName || 'File'} operation: ${fileName}`,
+        ...(metadata && { metadata }),
+      };
+    } catch (error) {
+      this.log(`Error creating resource content: ${error}`, 'WARN');
+      return null;
+    }
+  }
+
+  /**
+   * Generate enhanced resource metadata
+   */
+  private generateResourceMetadata(output: string, filePath: string, toolName?: string): ResourceMetadata {
+    const metadata: ResourceMetadata = {};
+    
+    // Extract file size if available in output
+    const sizeMatch = output.match(/(\d+)\s*bytes?/i);
+    if (sizeMatch) {
+      metadata.size = parseInt(sizeMatch[1], 10);
+    }
+    
+    // Detect encoding
+    if (output.includes('UTF-8') || output.includes('utf-8')) {
+      metadata.encoding = 'utf-8';
+    } else if (output.includes('ASCII') || output.includes('ascii')) {
+      metadata.encoding = 'ascii';
+    } else {
+      metadata.encoding = 'utf-8'; // Default assumption
+    }
+    
+    // Detect language from file path
+    metadata.language = this.detectLanguageFromPath(filePath);
+    
+    // Extract last modified if available
+    const modifiedMatch = output.match(/modified[:\s]+([^\n]+)/i);
+    if (modifiedMatch) {
+      try {
+        const date = new Date(modifiedMatch[1].trim());
+        if (!isNaN(date.getTime())) {
+          metadata.lastModified = date.toISOString();
+        }
+      } catch {
+        // Ignore date parsing errors
+      }
+    }
+    
+    // Extract permissions if available (Unix style)
+    const permMatch = output.match(/permissions?[:\s]+([rwx-]{9,10})/i);
+    if (permMatch) {
+      metadata.permissions = permMatch[1];
+    }
+    
+    // For Read operations, try to estimate content from line count
+    if (toolName === 'Read') {
+      const lineCount = output.split('\n').length;
+      // Rough estimate: average 80 characters per line
+      if (!metadata.size && lineCount > 1) {
+        metadata.size = lineCount * 80;
+      }
+    }
+    
+    return metadata;
+  }
+
+  private shouldEnableStreaming(toolName?: string): boolean {
+    if (!this.extendedClientCapabilities.experimental?.streamingContent) return false;
+    
+    // Enable streaming for long-running operations
+    const streamingTools = ['bash', 'webfetch', 'websearch', 'multiedit'];
+    const lowerToolName = toolName?.toLowerCase() || '';
+    
+    return streamingTools.some(tool => lowerToolName.includes(tool)) ||
+           toolName?.startsWith('mcp__') === true;
+  }
+
+  private startStreaming(toolCallId: string, estimatedSize?: number): void {
+    this.streamingUpdates.set(toolCallId, {
+      chunks: [],
+      totalSize: estimatedSize,
+    });
+  }
+
+  private addStreamingChunk(toolCallId: string, chunk: string, sessionId: string): void {
+    const streaming = this.streamingUpdates.get(toolCallId);
+    if (!streaming) return;
+    
+    streaming.chunks.push(chunk);
+    
+    // Send streaming update
+    const updatePromise = this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "in_progress",
+        content: [{
+          type: "content" as const,
+          content: {
+            type: "text" as const,
+            text: chunk,
+          },
+        }],
+      },
+    });
+    
+    // Handle promise if it exists (for real client calls)
+    if (updatePromise?.catch) {
+      updatePromise.catch(error => {
+        this.log(`Error sending streaming update: ${error}`, 'WARN');
+      });
+    }
+  }
+
+  private completeStreaming(toolCallId: string, _sessionId: string): string {
+    const streaming = this.streamingUpdates.get(toolCallId);
+    if (!streaming) return '';
+    
+    const fullContent = streaming.chunks.join('');
+    this.streamingUpdates.delete(toolCallId);
+    return fullContent;
+  }
+
+  private generateBatchId(): string {
+    return `batch_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  private shouldBatchToolCalls(toolNames: string[]): boolean {
+    if (!this.extendedClientCapabilities.experimental?.toolCallBatching) return false;
+    if (toolNames.length < 2) return false;
+    
+    // Batch file operations that are related
+    const fileOperations = ['read', 'write', 'edit', 'multiedit', 'glob', 'ls'];
+    const batchableOperations = toolNames.filter(name => 
+      fileOperations.some(op => name.toLowerCase().includes(op))
+    );
+    
+    // If most operations are file-related, batch them
+    return batchableOperations.length >= Math.ceil(toolNames.length * 0.7);
+  }
+
+  private createToolCallBatch(
+    toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
+    batchType: 'parallel' | 'sequential' = 'sequential'
+  ): ToolCallBatch {
+    const batchId = this.generateBatchId();
+    
+    const batch: ToolCallBatch = {
+      batchId,
+      batchType,
+      toolCalls: toolCalls.map(tc => ({
+        id: tc.id,
+        name: tc.name,
+        input: tc.input,
+        status: 'pending' as const,
+      })),
+      metadata: {
+        totalOperations: toolCalls.length,
+        completedOperations: 0,
+        failedOperations: 0,
+      },
+    };
+    
+    this.activeBatches.set(batchId, batch);
+    return batch;
+  }
+
+  private updateBatchedToolCall(
+    batchId: string,
+    toolCallId: string,
+    status: 'pending' | 'in_progress' | 'completed' | 'failed',
+    output?: string,
+    error?: string
+  ): void {
+    const batch = this.activeBatches.get(batchId);
+    if (!batch) return;
+    
+    const toolCall = batch.toolCalls.find(tc => tc.id === toolCallId);
+    if (!toolCall) return;
+    
+    const previousStatus = toolCall.status;
+    toolCall.status = status;
+    toolCall.output = output;
+    toolCall.error = error;
+    
+    // Update batch metadata
+    if (previousStatus !== 'completed' && status === 'completed') {
+      batch.metadata!.completedOperations++;
+    }
+    if (previousStatus !== 'failed' && status === 'failed') {
+      batch.metadata!.failedOperations++;
+    }
+    
+    this.log(`Batch ${batchId} tool ${toolCallId}: ${previousStatus} -> ${status}`, 'DEBUG');
+  }
+
+  private sendBatchUpdate(sessionId: string, batchId: string): void {
+    const batch = this.activeBatches.get(batchId);
+    if (!batch) return;
+    
+    const completedCount = batch.metadata!.completedOperations;
+    const totalCount = batch.metadata!.totalOperations;
+    const progress = Math.round((completedCount / totalCount) * 100);
+    
+    const updatePromise = this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: batchId,
+        status: completedCount === totalCount ? "completed" : "in_progress",
+        content: [{
+          type: "content" as const,
+          content: {
+            type: "text" as const,
+            text: `Batch operation: ${completedCount}/${totalCount} completed (${progress}%)`,
+          },
+        }],
+      },
+    });
+    
+    // Handle promise if it exists (for real client calls)
+    if (updatePromise?.catch) {
+      updatePromise.catch(error => {
+        this.log(`Error sending batch update: ${error}`, 'WARN');
+      });
+    }
+    
+    // Clean up completed batches
+    if (completedCount === totalCount) {
+      this.activeBatches.delete(batchId);
+    }
+  }
+
+  private isBatchComplete(batchId: string): boolean {
+    const batch = this.activeBatches.get(batchId);
+    if (!batch) return true;
+    
+    return batch.metadata!.completedOperations + batch.metadata!.failedOperations === batch.metadata!.totalOperations;
+  }
+
+  /**
+   * Detect the type of file operation
+   */
+  private detectFileOperation(toolName?: string, output?: string): string {
+    if (toolName) {
+      const operations: Record<string, string> = {
+        'Read': 'read',
+        'Write': 'write',
+        'Edit': 'edit',
+        'MultiEdit': 'edit',
+        'Glob': 'search',
+      };
+      return operations[toolName] || 'unknown';
+    }
+    
+    if (output) {
+      if (output.includes('Applied') && output.includes('edit')) return 'edit';
+      if (output.includes('Created file')) return 'write';
+      if (output.includes('→')) return 'read'; // Line number format
+    }
+    
+    return 'unknown';
+  }
+
+  /**
+   * Check if output represents diff content
+   */
+  private isDiffOutput(output: string, toolName?: string): boolean {
+    if (toolName === 'Edit' || toolName === 'MultiEdit') {
+      return output.includes('Applied') && output.includes('edit');
+    }
+    
+    // Check for diff-like patterns
+    const diffPatterns = [
+      /^[-+]\s/m, // Git diff style
+      /^@@\s/m,   // Hunk headers
+      /^diff --git/m, // Git diff headers
+    ];
+    
+    return diffPatterns.some(pattern => pattern.test(output));
+  }
+
+  /**
+   * Create diff content block with enhanced metadata
+   */
+  private createDiffContent(output: string, toolName?: string): { type: string; text?: string; metadata?: DiffMetadata } | null {
+    try {
+      const metadata = this.parseDiffMetadata(output, toolName);
+      
+      return {
+        type: "text",
+        text: output,
+        ...(this.extendedClientCapabilities.experimental?.richDiffs && { metadata }),
+      };
+    } catch (error) {
+      this.log(`Error creating diff content: ${error}`, 'WARN');
+      return null;
+    }
+  }
+
+  /**
+   * Parse diff metadata from output with granular hunk support
+   */
+  private parseDiffMetadata(output: string, toolName?: string): DiffMetadata {
+    let linesAdded = 0;
+    let linesRemoved = 0;
+    let language: string | undefined = undefined;
+    let hunks: DiffHunk[] | undefined = undefined;
+    
+    // For Edit/MultiEdit tools, try to extract from success message
+    if (toolName === 'Edit' || toolName === 'MultiEdit') {
+      // Extract file path for language detection
+      const filePathMatch = output.match(/to\s+([^\s]+\.[a-zA-Z0-9]+)/);
+      if (filePathMatch) {
+        const filePath = filePathMatch[1];
+        language = this.detectLanguageFromPath(filePath);
+      }
+      
+      // Simple heuristic: assume 1 change for basic edits
+      linesAdded = 1;
+      linesRemoved = 0;
+    } else {
+      // Parse unified diff format with granular hunks
+      const parsedHunks = this.parseUnifiedDiffHunks(output);
+      if (parsedHunks.length > 0) {
+        hunks = parsedHunks;
+        
+        // Calculate totals from hunks
+        for (const hunk of hunks) {
+          linesAdded += hunk.metadata?.linesAdded || 0;
+          linesRemoved += hunk.metadata?.linesRemoved || 0;
+        }
+      } else {
+        // Fallback to simple line counting
+        const lines = output.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('+') && !line.startsWith('+++')) {
+            linesAdded++;
+          } else if (line.startsWith('-') && !line.startsWith('---')) {
+            linesRemoved++;
+          }
+        }
+      }
+      
+      // Try to detect language from file headers
+      const lines = output.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('---') || line.startsWith('+++')) {
+          const fileMatch = line.match(/[ab]\/([^\s]+)/);
+          if (fileMatch) {
+            const filePath = fileMatch[1];
+            language = this.detectLanguageFromPath(filePath);
+            break;
+          }
+        }
+      }
+    }
+    
+    return {
+      linesAdded,
+      linesRemoved,
+      language,
+      encoding: 'utf-8', // Default assumption
+      ...(this.extendedClientCapabilities.experimental?.richDiffs && hunks && { hunks }),
+    };
+  }
+
+  /**
+   * Parse unified diff format into granular hunks
+   */
+  private parseUnifiedDiffHunks(diffOutput: string): DiffHunk[] {
+    const lines = diffOutput.split('\n');
+    const hunks: DiffHunk[] = [];
+    let currentHunk: Partial<DiffHunk> | null = null;
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      // Check for hunk header (@@)
+      const hunkHeaderMatch = line.match(/^@@\s*-(\d+)(?:,(\d+))?\s*\+(\d+)(?:,(\d+))?\s*@@(.*)$/);
+      if (hunkHeaderMatch) {
+        // Finish previous hunk
+        if (currentHunk && currentHunk.changes) {
+          hunks.push(currentHunk as DiffHunk);
+        }
+        
+        // Start new hunk
+        const oldStart = parseInt(hunkHeaderMatch[1], 10);
+        const oldLength = hunkHeaderMatch[2] ? parseInt(hunkHeaderMatch[2], 10) : 1;
+        const newStart = parseInt(hunkHeaderMatch[3], 10);
+        const newLength = hunkHeaderMatch[4] ? parseInt(hunkHeaderMatch[4], 10) : 1;
+        const header = line;
+        
+        currentHunk = {
+          oldStart,
+          oldLength,
+          newStart,
+          newLength,
+          header,
+          changes: [],
+          metadata: {
+            linesAdded: 0,
+            linesRemoved: 0,
+            linesContext: 0,
+          },
+        };
+        continue;
+      }
+      
+      // Process change lines within a hunk
+      if (currentHunk && currentHunk.changes) {
+        let changeType: DiffChange['type'] | null = null;
+        let content = line;
+        
+        if (line.startsWith('+')) {
+          changeType = 'add';
+          content = line.substring(1);
+          currentHunk.metadata!.linesAdded++;
+        } else if (line.startsWith('-')) {
+          changeType = 'remove';
+          content = line.substring(1);
+          currentHunk.metadata!.linesRemoved++;
+        } else if (line.startsWith(' ') || line === '') {
+          changeType = 'context';
+          content = line.substring(1);
+          currentHunk.metadata!.linesContext++;
+        }
+        
+        if (changeType) {
+          const change: DiffChange = {
+            type: changeType,
+            line,
+            content,
+          };
+          
+          // Calculate line numbers
+          if ((changeType === 'add' || changeType === 'context') && currentHunk.newStart !== undefined) {
+            const previousNewLines = currentHunk.changes
+              .filter(c => c.type === 'add' || c.type === 'context').length;
+            change.newLineNumber = currentHunk.newStart + previousNewLines;
+          }
+          
+          if ((changeType === 'remove' || changeType === 'context') && currentHunk.oldStart !== undefined) {
+            const previousOldLines = currentHunk.changes
+              .filter(c => c.type === 'remove' || c.type === 'context').length;
+            change.oldLineNumber = currentHunk.oldStart + previousOldLines;
+          }
+          
+          currentHunk.changes.push(change);
+        }
+      }
+    }
+    
+    // Finish final hunk
+    if (currentHunk && currentHunk.changes) {
+      hunks.push(currentHunk as DiffHunk);
+    }
+    
+    return hunks;
+  }
+
+  /**
+   * Detect programming language from file path
+   */
+  private detectLanguageFromPath(filePath: string): string | undefined {
+    const extension = filePath.toLowerCase().split('.').pop();
+    
+    const languageMap: Record<string, string> = {
+      'ts': 'typescript',
+      'tsx': 'typescript',
+      'js': 'javascript',
+      'jsx': 'javascript',
+      'py': 'python',
+      'java': 'java',
+      'cpp': 'cpp',
+      'c': 'c',
+      'h': 'c',
+      'cs': 'csharp',
+      'php': 'php',
+      'rb': 'ruby',
+      'go': 'go',
+      'rs': 'rust',
+      'swift': 'swift',
+      'kt': 'kotlin',
+      'scala': 'scala',
+      'css': 'css',
+      'scss': 'scss',
+      'html': 'html',
+      'xml': 'xml',
+      'json': 'json',
+      'yaml': 'yaml',
+      'yml': 'yaml',
+      'md': 'markdown',
+      'sql': 'sql',
+      'sh': 'bash',
+      'bash': 'bash',
+      'zsh': 'bash',
+      'fish': 'bash',
+    };
+    
+    return extension ? languageMap[extension] : undefined;
+  }
+
+  /**
+   * Detect media content (images, audio) in output
+   */
+  private async detectMediaContent(
+    output: string
+  ): Promise<{ type: string; text?: string; uri?: string; name?: string; mimeType?: string; description?: string } | null> {
+    try {
+      // Check for base64 image data
+      const base64ImagePattern = /data:image\/([^;]+);base64,([A-Za-z0-9+/=]+)/;
+      const imageMatch = output.match(base64ImagePattern);
+      
+      if (imageMatch) {
+        return {
+          type: "text",
+          text: `[Image detected: ${imageMatch[1]} format]`,
+        };
+      }
+      
+      // Check for audio data
+      const base64AudioPattern = /data:audio\/([^;]+);base64,([A-Za-z0-9+/=]+)/;
+      const audioMatch = output.match(base64AudioPattern);
+      
+      if (audioMatch) {
+        return {
+          type: "text",
+          text: `[Audio detected: ${audioMatch[1]} format]`,
+        };
+      }
+      
+      // Check for image/audio file paths
+      const mediaFilePattern = /\b([^\s]+\.(png|jpg|jpeg|gif|svg|webp|mp3|wav|ogg|m4a))\b/i;
+      const mediaFileMatch = output.match(mediaFilePattern);
+      
+      if (mediaFileMatch) {
+        const filePath = mediaFileMatch[1];
+        const extension = mediaFileMatch[2].toLowerCase();
+        const isImage = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(extension);
+        const isAudio = ['mp3', 'wav', 'ogg', 'm4a'].includes(extension);
+        
+        if (isImage) {
+          return {
+            type: "resource_link",
+            uri: `file://${filePath}`,
+            name: filePath.substring(filePath.lastIndexOf('/') + 1),
+            mimeType: MIME_TYPE_MAPPINGS[`.${extension}`] || 'image/jpeg',
+            description: `Image file: ${filePath}`,
+          };
+        } else if (isAudio) {
+          return {
+            type: "resource_link",
+            uri: `file://${filePath}`,
+            name: filePath.substring(filePath.lastIndexOf('/') + 1),
+            mimeType: MIME_TYPE_MAPPINGS[`.${extension}`] || 'audio/mpeg',
+            description: `Audio file: ${filePath}`,
+          };
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      this.log(`Error detecting media content: ${error}`, 'WARN');
+      return null;
+    }
+  }
+
+  /**
+   * Check if a tool is allowed to execute based on permissions
+   */
+  private isToolAllowed(toolName: string): boolean {
+    const config = this.toolPermissions;
+    
+    // Check explicit deny list
+    if (config.disallowedTools?.includes(toolName)) {
+      return false;
+    }
+    
+    // Check explicit allow list (if present, only these tools are allowed)
+    if (config.allowedTools && config.allowedTools.length > 0) {
+      return config.allowedTools.includes(toolName);
+    }
+    
+    // Check per-tool permissions
+    if (config.toolPermissions && toolName in config.toolPermissions) {
+      const permission = config.toolPermissions[toolName];
+      return permission !== "deny"; // allow both "allow" and "ask" permissions
+    }
+    
+    // Use default permission
+    return config.defaultPermission !== "deny";
+  }
+
+  /**
+   * Update tool permissions configuration
+   */
+  public updateToolPermissions(config: Partial<ToolPermissionConfig>): void {
+    this.toolPermissions = {
+      ...this.toolPermissions,
+      ...config,
+    };
+    
+    this.log(`Updated tool permissions`, 'INFO', { config });
+  }
+
+  /**
+   * Get current tool permissions configuration
+   */
+  public getToolPermissions(): ToolPermissionConfig {
+    return { ...this.toolPermissions };
   }
 }

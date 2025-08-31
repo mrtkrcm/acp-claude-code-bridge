@@ -2,6 +2,7 @@ import { writeFile, readFile, mkdir, access } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import type { EnhancedContentBlock } from './types.js';
 
 interface PersistedSessionData {
   sessionId: string;
@@ -16,6 +17,16 @@ interface PersistedSessionData {
   createdAt: string;
   lastAccessed: string;
   metadata?: Record<string, unknown>;
+  enhancedContent?: EnhancedContentHistory[];
+}
+
+interface EnhancedContentHistory {
+  id: string;
+  timestamp: string;
+  toolName?: string;
+  contentType: 'image' | 'audio' | 'resource' | 'diff';
+  content: EnhancedContentBlock;
+  metadata?: Record<string, unknown>;
 }
 
 interface SessionPersistenceConfig {
@@ -23,6 +34,7 @@ interface SessionPersistenceConfig {
   maxSessions?: number;
   maxAge?: number; // in milliseconds
   compressionEnabled?: boolean;
+  maxEnhancedContent?: number; // Maximum enhanced content items per session
 }
 
 export class SessionPersistenceManager {
@@ -30,12 +42,14 @@ export class SessionPersistenceManager {
   private readonly maxSessions: number;
   private readonly maxAge: number;
   private readonly compressionEnabled: boolean;
+  private readonly maxEnhancedContent: number;
   
   constructor(config: SessionPersistenceConfig = {}) {
     this.baseDir = config.baseDir || resolve(homedir(), '.acp-claude-code', 'sessions');
     this.maxSessions = config.maxSessions || 100;
     this.maxAge = config.maxAge || 7 * 24 * 60 * 60 * 1000; // 7 days
     this.compressionEnabled = config.compressionEnabled || false;
+    this.maxEnhancedContent = config.maxEnhancedContent || 50;
     
     this.ensureDirectoryExists();
   }
@@ -264,6 +278,184 @@ export class SessionPersistenceManager {
 
   private getSessionPath(sessionId: string): string {
     return resolve(this.baseDir, `${sessionId}.json`);
+  }
+
+  /**
+   * Store enhanced content for a session
+   */
+  async storeEnhancedContent(
+    sessionId: string,
+    content: EnhancedContentBlock,
+    toolName?: string
+  ): Promise<void> {
+    try {
+      // Load existing session data
+      let sessionData = await this.loadSession(sessionId);
+      if (!sessionData) {
+        sessionData = {
+          sessionId,
+          createdAt: new Date().toISOString(),
+          lastAccessed: new Date().toISOString(),
+          enhancedContent: [],
+        };
+      }
+
+      // Ensure enhancedContent array exists
+      if (!sessionData.enhancedContent) {
+        sessionData.enhancedContent = [];
+      }
+
+      // Create new content entry
+      const contentEntry: EnhancedContentHistory = {
+        id: this.generateContentId(),
+        timestamp: new Date().toISOString(),
+        toolName,
+        contentType: content.type,
+        content,
+        metadata: {
+          size: this.calculateContentSize(content),
+        },
+      };
+
+      // Add to session
+      sessionData.enhancedContent.unshift(contentEntry);
+
+      // Trim to max content limit
+      if (sessionData.enhancedContent.length > this.maxEnhancedContent) {
+        sessionData.enhancedContent = sessionData.enhancedContent.slice(0, this.maxEnhancedContent);
+      }
+
+      // Save updated session
+      await this.saveSession(sessionData);
+    } catch (error) {
+      throw new Error(
+        `Failed to store enhanced content for session ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * Retrieve enhanced content for a session
+   */
+  async getEnhancedContent(
+    sessionId: string,
+    contentType?: 'image' | 'audio' | 'resource' | 'diff',
+    limit?: number
+  ): Promise<EnhancedContentHistory[]> {
+    try {
+      const sessionData = await this.loadSession(sessionId);
+      if (!sessionData?.enhancedContent) {
+        return [];
+      }
+
+      let content = sessionData.enhancedContent;
+
+      // Filter by content type if specified
+      if (contentType) {
+        content = content.filter(item => item.contentType === contentType);
+      }
+
+      // Apply limit if specified
+      if (limit && limit > 0) {
+        content = content.slice(0, limit);
+      }
+
+      return content;
+    } catch (error) {
+      throw new Error(
+        `Failed to get enhanced content for session ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * Delete specific enhanced content entry
+   */
+  async deleteEnhancedContent(sessionId: string, contentId: string): Promise<boolean> {
+    try {
+      const sessionData = await this.loadSession(sessionId);
+      if (!sessionData?.enhancedContent) {
+        return false;
+      }
+
+      const initialLength = sessionData.enhancedContent.length;
+      sessionData.enhancedContent = sessionData.enhancedContent.filter(
+        item => item.id !== contentId
+      );
+
+      const wasDeleted = sessionData.enhancedContent.length < initialLength;
+      if (wasDeleted) {
+        await this.saveSession(sessionData);
+      }
+
+      return wasDeleted;
+    } catch (error) {
+      throw new Error(
+        `Failed to delete enhanced content ${contentId} for session ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * Get enhanced content statistics for a session
+   */
+  async getEnhancedContentStats(sessionId: string): Promise<{
+    totalItems: number;
+    contentTypes: Record<string, number>;
+    totalSize: number;
+    oldestContent?: string;
+    newestContent?: string;
+  }> {
+    try {
+      const content = await this.getEnhancedContent(sessionId);
+      const contentTypes: Record<string, number> = {};
+      let totalSize = 0;
+
+      content.forEach(item => {
+        contentTypes[item.contentType] = (contentTypes[item.contentType] || 0) + 1;
+        totalSize += this.calculateContentSize(item.content);
+      });
+
+      return {
+        totalItems: content.length,
+        contentTypes,
+        totalSize,
+        oldestContent: content.length > 0 ? content[content.length - 1].timestamp : undefined,
+        newestContent: content.length > 0 ? content[0].timestamp : undefined,
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to get enhanced content stats for session ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * Generate unique content ID
+   */
+  private generateContentId(): string {
+    return `content_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  /**
+   * Calculate approximate size of content in bytes
+   */
+  private calculateContentSize(content: EnhancedContentBlock): number {
+    try {
+      const jsonString = JSON.stringify(content);
+      return new Blob([jsonString]).size;
+    } catch {
+      // Fallback to rough character count estimation
+      return JSON.stringify(content).length * 2; // Rough UTF-8 estimation
+    }
   }
 }
 

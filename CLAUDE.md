@@ -30,9 +30,10 @@ The bridge implements the Agent Client Protocol with these core components:
 The `ClaudeACPAgent` class orchestrates all bridge functionality:
 - **Session Management**: Maps ACP session IDs to Claude sessions with persistent resume capability
 - **Message Processing**: Converts between ACP and Claude SDK message formats in `handleClaudeMessage()`
-- **Tool Integration**: Maps Claude tools to ACP kinds (read/edit/delete/move/search/execute/think/fetch/other)
-- **Permission System**: Supports multiple permission modes (default/acceptEdits/bypassPermissions/plan)
-- **Context Monitoring**: Tracks 200k context window usage with warnings
+- **Advanced Tool System**: Extended tool kind mapping, streaming, batching, and timing metadata
+- **Enhanced Content Processing**: Rich diff parsing, resource metadata, and file operation detection  
+- **Permission System**: Dynamic tool permissions with granular control and client capability detection
+- **Context Monitoring**: Tracks 200k context window usage with warnings and cleanup
 
 ### 2. Context Monitor (src/context-monitor.ts) - Resource Management
 Prevents context overflow with smart monitoring:
