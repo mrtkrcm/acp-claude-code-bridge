@@ -1,6 +1,6 @@
 {
   "name": "@mrtkrcm/acp-claude-code",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "ACP (Agent Client Protocol) bridge for Claude Code",
   "main": "dist/cli.js",
   "type": "module",
@@ -53,7 +53,7 @@
   "author": "Murat <karacamjr@gmail.com>",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/claude-code": "^1.2.3",
+    "@anthropic-ai/claude-code": "^1.0.98",
     "@zed-industries/agent-client-protocol": "0.1.2"
   },
   "devDependencies": {
@@ -75,5 +75,9 @@
     "typescript": "^5.0.0",
     "typescript-eslint": "8.20.0",
     "vitest": "^3.2.4"
-  }
+  },
+  "directories": {
+    "test": "test"
+  },
+  "types": "./dist/cli.d.ts"
 }
