@@ -40,6 +40,8 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "validate": "pnpm run typecheck && pnpm run lint && pnpm run test:run",
+    "cleanup": "node scripts/cleanup.js",
+    "maintenance": "node scripts/cleanup.js",
     "prepublishOnly": "pnpm run build",
     "prepare": "pnpm run build"
   },

@@ -33,3 +33,9 @@ Thumbs.db
 # Temporary analysis files
 ANALYSIS.md
 TODO.md
+NEXT_STEPS.md
+
+# Test files (temporary, not tracked)
+test-*.js
+*test-report*.json
+session-*test*.json
