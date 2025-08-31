@@ -488,7 +488,10 @@ export class ClaudeACPAgent implements Agent {
           this.logger.warn(`Failed to persist context stats: ${error}`, { sessionId: currentSessionId });
         });
         
-        // Send concise context status
+        // Send concise context status with safe property access
+        const usage = contextWarning.usage || 0;
+        const usagePercent = Math.round(usage * 100);
+        
         if (contextWarning.level === 'critical') {
           await this.client.sessionUpdate({
             sessionId: currentSessionId,
@@ -496,7 +499,7 @@ export class ClaudeACPAgent implements Agent {
               sessionUpdate: "agent_message_chunk",
               content: {
                 type: "text",
-                text: `Context near limit (${Math.round(contextWarning.usage * 100)}%) - consider new session`,
+                text: `Context near limit (${usagePercent}%) - consider new session`,
               },
             },
           });
@@ -507,7 +510,7 @@ export class ClaudeACPAgent implements Agent {
               sessionUpdate: "agent_message_chunk",
               content: {
                 type: "text",
-                text: `Context usage: ${Math.round(contextWarning.usage * 100)}%`,
+                text: `Context usage: ${usagePercent}%`,
               },
             },
           });
@@ -1439,9 +1442,7 @@ export class ClaudeACPAgent implements Agent {
     completedCount: number,
     totalCount: number
   ): string {
-    const progressPercent = Math.round((completedCount / totalCount) * 100);
-    
-    // Find current task for concise display
+    // Find current and next tasks for enhanced display
     const currentTask = todos.find(t => t.status === 'in_progress');
     if (!currentTask) {
       return `✓ All ${totalCount} tasks completed`;
@@ -1450,8 +1451,26 @@ export class ClaudeACPAgent implements Agent {
     const currentTaskContent = typeof currentTask.content === 'string' ? 
       currentTask.content : JSON.stringify(currentTask.content);
     
-    // Elegant single-line progress with current task
-    return `Task ${completedCount + 1}/${totalCount}: ${currentTaskContent}`;
+    // Find next pending task
+    const nextTask = todos.find(t => t.status === 'pending');
+    
+    // Create visually distinct framed display
+    let display = `┌─ Task ${completedCount + 1}/${totalCount}\n`;
+    display += `│ ${currentTaskContent}\n`;
+    
+    if (nextTask) {
+      const nextTaskContent = typeof nextTask.content === 'string' ? 
+        nextTask.content : JSON.stringify(nextTask.content);
+      // Truncate next task if too long to keep display clean
+      const truncatedNext = nextTaskContent.length > 50 ? 
+        nextTaskContent.substring(0, 47) + '...' : nextTaskContent;
+      display += `├─ Next\n`;
+      display += `│ ${truncatedNext}\n`;
+    }
+    
+    display += `└─`;
+    
+    return display;
   }
 
   /**
