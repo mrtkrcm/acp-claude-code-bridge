@@ -800,23 +800,7 @@ export class ClaudeACPAgent implements Agent {
                 const totalCount = todos.length;
                 const progressPercent = Math.round((completedCount / totalCount) * 100);
                 
-                let todoText = `[*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
-                todoText += `${'─'.repeat(40)}\n`;
-                
-                todos.forEach((todo, index) => {
-                  const statusIndicator =
-                    todo.status === "completed"
-                      ? "[✓]"
-                      : todo.status === "in_progress"
-                        ? "[~]"
-                        : "[ ]";
-                  const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
-                  // Ensure all values are properly stringified to prevent [object Object]
-                  const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
-                  todoText += `${taskNumber}. ${statusIndicator} ${content}\n`;
-                });
-                
-                todoText += `${'─'.repeat(40)}`;
+                const todoText = this.generateTaskProgressDisplay(todos, completedCount, totalCount);
 
                 // Use proper content format with promise handling
                 const updatePromise = this.client.sessionUpdate({
@@ -1051,23 +1035,7 @@ export class ClaudeACPAgent implements Agent {
             const totalCount = todos.length;
             const progressPercent = Math.round((completedCount / totalCount) * 100);
             
-            let todoText = `[*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
-            todoText += `${'─'.repeat(40)}\n`;
-            
-            todos.forEach((todo, index) => {
-              const statusIndicator =
-                todo.status === "completed"
-                  ? "[✓]"
-                  : todo.status === "in_progress"
-                    ? "[~]"
-                    : "[ ]";
-              const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
-              // Ensure all values are properly stringified to prevent [object Object]
-              const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
-              todoText += `${taskNumber}. ${statusIndicator} ${content}\n`;
-            });
-            
-            todoText += `${'─'.repeat(40)}`;
+            const todoText = this.generateTaskProgressDisplay(todos, completedCount, totalCount);
 
             // Use proper content format and add delay to prevent message flooding
             const updatePromise = this.client.sessionUpdate({
@@ -1438,6 +1406,60 @@ export class ClaudeACPAgent implements Agent {
     }
     
     return riskLevel ? `${description}\n\n${riskLevel}` : description;
+  }
+
+  /**
+   * Generate enhanced task progress display with better formatting and progress bar.
+   */
+  private generateTaskProgressDisplay(
+    todos: Array<{
+      content: string | unknown;
+      status: string;
+      id: string;
+    }>,
+    completedCount: number,
+    totalCount: number
+  ): string {
+    const progressPercent = Math.round((completedCount / totalCount) * 100);
+    const inProgressCount = todos.filter(t => t.status === 'in_progress').length;
+    
+    // Generate progress bar
+    const barLength = 30;
+    const filledLength = Math.round((completedCount / totalCount) * barLength);
+    const progressBar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
+    
+    // Header with progress bar
+    let display = `\n┌─ 📋 Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
+    display += `├─ [${progressBar}] ${progressPercent}%\n`;
+    
+    if (inProgressCount > 0) {
+      display += `├─ ⚡ Currently working on ${inProgressCount} task${inProgressCount > 1 ? 's' : ''}\n`;
+    }
+    
+    display += `├─${'─'.repeat(50)}\n`;
+    
+    // Task list with better icons and formatting
+    todos.forEach((todo, index) => {
+      const statusIcon = 
+        todo.status === "completed" ? "✅" :
+        todo.status === "in_progress" ? "⚡" : "⏳";
+      
+      const statusText =
+        todo.status === "completed" ? "DONE" :
+        todo.status === "in_progress" ? "WORK" : "TODO";
+      
+      const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
+      const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
+      
+      // Truncate long content for better readability
+      const truncatedContent = content.length > 60 ? content.substring(0, 57) + '...' : content;
+      
+      display += `├─ ${taskNumber}. [${statusText}] ${statusIcon} ${truncatedContent}\n`;
+    });
+    
+    display += `└─${('─'.repeat(50))}\n`;
+    
+    return display;
   }
 
   /**
