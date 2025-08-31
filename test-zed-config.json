@@ -1,0 +1,1 @@
+{"agent_servers":{"claude-code":{"command":"npx","args":["@mrtkrcm/acp-claude-code@0.9.0"],"env":{"ACP_PERMISSION_MODE":"acceptEdits"}}}}
