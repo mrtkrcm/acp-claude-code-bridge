@@ -76,7 +76,7 @@ describe('ContextMonitor', () => {
       expect(warning).not.toBeNull()
       expect(warning!.level).toBe('critical')
       expect(warning!.usage).toBeGreaterThanOrEqual(0.95) // Above or at critical threshold
-      expect(warning!.recommendation).toBeDefined()
+      expect(warning!.message).toContain('critical')
     })
   })
 
@@ -152,7 +152,7 @@ describe('ContextMonitor', () => {
       monitor.addMessage(sessionId, 'x'.repeat(640000), 'user')
       
       const summary = monitor.getSessionSummary(sessionId)
-      expect(summary).toContain('[⚠]') // Warning marker
+      expect(summary).toContain('[WARNING]') // Warning marker
       expect(summary).toContain('HIGH') // HIGH usage indicator
     })
   })

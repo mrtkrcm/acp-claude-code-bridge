@@ -319,16 +319,16 @@ export class DiagnosticSystem {
   static formatReport(report: DiagnosticReport): string {
     const { platform, claudeCode, configuration, issues, compatible, score } = report;
     
-    let output = '🔍 ACP-Claude-Code Diagnostic Report\n';
+    let output = 'ACP-Claude-Code Diagnostic Report\n';
     output += '=' .repeat(50) + '\n\n';
     
     // Overall status
-    const statusEmoji = compatible ? '✅' : '❌';
-    output += `${statusEmoji} Overall Status: ${compatible ? 'COMPATIBLE' : 'ISSUES FOUND'}\n`;
-    output += `📊 Compatibility Score: ${score}/100\n\n`;
+    const statusSymbol = compatible ? '[OK]' : '[ERROR]';
+    output += `${statusSymbol} Overall Status: ${compatible ? 'COMPATIBLE' : 'ISSUES FOUND'}\n`;
+    output += `Compatibility Score: ${score}/100\n\n`;
     
     // Platform info
-    output += '🖥️ Platform Information:\n';
+    output += 'Platform Information:\n';
     output += `   Platform: ${platform.platform} (${platform.arch})\n`;
     output += `   Node.js: ${platform.nodeVersion}\n`;
     output += `   TTY Support: ${platform.hasTTY ? 'Yes' : 'No'}\n`;
@@ -347,7 +347,7 @@ export class DiagnosticSystem {
     output += '\n';
     
     // Configuration
-    output += '⚙️ Configuration:\n';
+    output += 'Configuration:\n';
     output += `   Permission Mode: ${configuration.permissionMode}\n`;
     output += `   Debug Mode: ${configuration.debugMode ? 'Enabled' : 'Disabled'}\n`;
     if (configuration.pathOverride) {
@@ -357,14 +357,14 @@ export class DiagnosticSystem {
     
     // Issues
     if (issues.length > 0) {
-      output += '⚠️ Issues Found:\n\n';
+      output += 'Issues Found:\n\n';
       
       const errors = issues.filter(i => i.level === 'error');
       const warnings = issues.filter(i => i.level === 'warning');  
       const infos = issues.filter(i => i.level === 'info');
       
       if (errors.length > 0) {
-        output += '🚨 ERRORS (Must Fix):\n';
+        output += 'ERRORS (Must Fix):\n';
         errors.forEach((issue, i) => {
           output += `   ${i + 1}. ${issue.message}\n`;
           if (issue.solution) output += `      → ${issue.solution}\n`;
@@ -373,7 +373,7 @@ export class DiagnosticSystem {
       }
       
       if (warnings.length > 0) {
-        output += '⚠️ WARNINGS (Should Fix):\n';
+        output += 'WARNINGS (Should Fix):\n';
         warnings.forEach((issue, i) => {
           output += `   ${i + 1}. ${issue.message}\n`;
           if (issue.solution) output += `      → ${issue.solution}\n`;
@@ -382,7 +382,7 @@ export class DiagnosticSystem {
       }
       
       if (infos.length > 0) {
-        output += '💡 SUGGESTIONS (Optional):\n';
+        output += 'SUGGESTIONS (Optional):\n';
         infos.forEach((issue, i) => {
           output += `   ${i + 1}. ${issue.message}\n`;
           if (issue.solution) output += `      → ${issue.solution}\n`;
@@ -390,7 +390,7 @@ export class DiagnosticSystem {
         output += '\n';
       }
     } else {
-      output += '✅ No issues found! Everything looks good.\n\n';
+      output += 'No issues found! Everything looks good.\n\n';
     }
     
     output += 'Run this diagnostic with: ACP_DEBUG=true acp-claude-code --diagnose\n';

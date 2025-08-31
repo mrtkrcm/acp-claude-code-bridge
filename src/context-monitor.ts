@@ -1,198 +1,72 @@
-export interface ContextStats {
-  estimatedTokens: number;
-  maxTokens: number;
-  usage: number;
-  messages: number;
-  turnCount: number;
-  lastUpdate: Date;
-}
-
-export interface MemoryStats {
-  activeSessions: number;
-  totalMessages: number;
-  totalTokens: number;
-  averageTokensPerSession: number;
-}
-
-export interface ContextWarning {
-  level: 'info' | 'warning' | 'critical';
-  message: string;
-  usage: number;
-  recommendation?: string;
-}
+export interface ContextWarning { level: 'warning' | 'critical'; message: string; usage: number; }
+export interface SessionStats { usage: number; estimatedTokens: number; messages: number; turnCount: number; lastActivity: number; lastUpdate: Date; }
 
 export class ContextMonitor {
-  private sessions: Map<string, ContextStats> = new Map();
-  private readonly MAX_TOKENS = 200000;
+  private sessions = new Map<string, SessionStats>();
+  private readonly CONTEXT_LIMIT = 200000;
   private readonly WARNING_THRESHOLD = 0.8;
   private readonly CRITICAL_THRESHOLD = 0.95;
-
-  constructor(_debugMode = false) {
-    // Debug mode parameter maintained for compatibility but not used
-    // Logging is handled by individual components now
-  }
-
-  private estimateTokens(text: string): number {
-    if (!text) return 0;
-    return Math.max(1, Math.ceil(text.length / 4));
+  
+  constructor(_debugMode?: boolean) {}
+  
+  addMessage(sessionId: string, content: string, role?: 'user' | 'assistant'): ContextWarning | null {
+    const tokens = Math.ceil(content.length / 4);
+    const stats = this.sessions.get(sessionId) || { usage: 0, estimatedTokens: 0, messages: 0, turnCount: 0, lastActivity: Date.now(), lastUpdate: new Date() };
+    
+    stats.estimatedTokens += tokens;
+    stats.usage = Math.min(stats.estimatedTokens / this.CONTEXT_LIMIT, 1);
+    stats.messages++;
+    if (role === 'user') stats.turnCount++;
+    stats.lastActivity = Date.now();
+    stats.lastUpdate = new Date();
+    
+    this.sessions.set(sessionId, stats);
+    
+    if (stats.usage >= this.CRITICAL_THRESHOLD) return { level: 'critical', message: `Context usage critical (${(stats.usage * 100).toFixed(1)}%)`, usage: stats.usage };
+    if (stats.usage >= this.WARNING_THRESHOLD) return { level: 'warning', message: `High context usage (${(stats.usage * 100).toFixed(1)}%)`, usage: stats.usage };
+    return null;
   }
   
-  addTokens(sessionId: string, tokenCount: number, turnCount?: number): ContextWarning | null {
-    const stats = this.sessions.get(sessionId) || {
-      estimatedTokens: 0,
-      maxTokens: this.MAX_TOKENS,
-      usage: 0,
-      messages: 0,
-      turnCount: 0,
-      lastUpdate: new Date()
-    };
-
-    stats.estimatedTokens += tokenCount;
-    stats.messages += 1;
-    if (turnCount) stats.turnCount = turnCount;
-    stats.usage = stats.estimatedTokens / stats.maxTokens;
-    stats.lastUpdate = new Date();
+  getStats(sessionId: string): SessionStats | null { return this.sessions.get(sessionId) || null; }
+  getAllStats(): Map<string, SessionStats> { return this.sessions; }
+  clearSession(sessionId: string): void { this.sessions.delete(sessionId); }
+  
+  getSessionSummary(sessionId: string): string {
+    const stats = this.sessions.get(sessionId);
+    if (!stats) return `Session ${sessionId}: No data`;
     
-    this.sessions.set(sessionId, stats);
-
-    if (stats.usage >= this.CRITICAL_THRESHOLD) {
-      return {
-        level: 'critical',
-        message: 'Context window nearly full',
-        usage: stats.usage,
-        recommendation: 'Consider starting new session'
-      };
-    } else if (stats.usage >= this.WARNING_THRESHOLD) {
-      return {
-        level: 'warning', 
-        message: 'High context usage',
-        usage: stats.usage
-      };
+    const usageKB = Math.round(stats.estimatedTokens / 1000);
+    const limitKB = Math.round(this.CONTEXT_LIMIT / 1000);
+    const percent = Math.round(stats.usage * 100);
+    const status = stats.usage >= this.CRITICAL_THRESHOLD ? '[!]' : stats.usage >= this.WARNING_THRESHOLD ? '[WARNING]' : '[✓]';
+    const usageLabel = stats.usage >= this.CRITICAL_THRESHOLD ? 'CRITICAL' : stats.usage >= this.WARNING_THRESHOLD ? 'HIGH' : 'OK';
+    const turnsLabel = stats.turnCount === 1 ? '1 turn' : `${stats.turnCount} turns`;
+    
+    return `${status} Context: ${usageKB}K/${limitKB}K (${percent}%) | ${turnsLabel} | Status: ${usageLabel}`;
+  }
+  
+  cleanupInactiveSessions(maxInactiveMs: number = 3600000): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const [sessionId, stats] of this.sessions.entries()) {
+      if (now - stats.lastActivity > maxInactiveMs) { this.sessions.delete(sessionId); removed++; }
     }
-
-    return null;
+    return removed;
   }
-
-  addMessage(sessionId: string, content: string, role?: 'user' | 'assistant'): ContextWarning | null {
-    const tokenCount = this.estimateTokens(content);
-    const isUserMessage = role === 'user';
-    
-    const stats = this.sessions.get(sessionId) || {
-      estimatedTokens: 0,
-      maxTokens: this.MAX_TOKENS,
-      usage: 0,
-      messages: 0,
-      turnCount: 0,
-      lastUpdate: new Date()
-    };
-
-    stats.estimatedTokens += tokenCount;
-    stats.messages += 1;
-    if (isUserMessage) stats.turnCount += 1;
-    stats.usage = stats.estimatedTokens / stats.maxTokens;
-    stats.lastUpdate = new Date();
-    
-    this.sessions.set(sessionId, stats);
-
-    if (stats.usage >= this.CRITICAL_THRESHOLD) {
-      return {
-        level: 'critical',
-        message: 'Context window nearly full',
-        usage: stats.usage,
-        recommendation: 'Consider starting new session'
-      };
-    } else if (stats.usage >= this.WARNING_THRESHOLD) {
-      return {
-        level: 'warning', 
-        message: 'High context usage',
-        usage: stats.usage
-      };
-    }
-
-    return null;
-  }
-
-  getStats(sessionId: string): ContextStats | null {
-    return this.sessions.get(sessionId) || null;
-  }
-
+  
   resetSession(sessionId: string): void {
     const stats = this.sessions.get(sessionId);
     if (stats) {
-      stats.estimatedTokens = 0;
-      stats.messages = 0;
-      stats.turnCount = 0;
-      stats.usage = 0;
-      stats.lastUpdate = new Date();
-      this.sessions.set(sessionId, stats);
+      stats.usage = 0; stats.estimatedTokens = 0; stats.messages = 0; stats.turnCount = 0;
+      stats.lastActivity = Date.now(); stats.lastUpdate = new Date();
     }
   }
-
-  clearSession(sessionId: string): void {
-    this.sessions.delete(sessionId);
+  
+  getMemoryStats(): { activeSessions: number; totalMessages: number; totalTokens: number; averageTokensPerSession: number } {
+    let totalMessages = 0; let totalTokens = 0;
+    for (const stats of this.sessions.values()) { totalMessages += stats.messages; totalTokens += stats.estimatedTokens; }
+    return { activeSessions: this.sessions.size, totalMessages, totalTokens, averageTokensPerSession: this.sessions.size ? totalTokens / this.sessions.size : 0 };
   }
-
-  getSessionSummary(sessionId: string): string {
-    const stats = this.sessions.get(sessionId);
-    if (!stats) return 'Session not found';
-
-    const tokensK = (stats.estimatedTokens / 1000).toFixed(1);
-    const maxTokensK = (stats.maxTokens / 1000).toFixed(0);
-    const usagePercent = Math.round(stats.usage * 100);
-    
-    let status = '[✓]';
-    let usageLabel = 'OK';
-    
-    if (stats.usage >= this.CRITICAL_THRESHOLD) {
-      status = '[!]';
-      usageLabel = 'CRITICAL';
-    } else if (stats.usage >= this.WARNING_THRESHOLD) {
-      status = '[⚠]';
-      usageLabel = 'HIGH';
-    }
-    
-    const turnsLabel = stats.turnCount === 1 ? '1 turn' : `${stats.turnCount} turns`;
-    
-    return `${status} Context: ${tokensK}K/${maxTokensK}K (${usagePercent}%) | ${turnsLabel} | Status: ${usageLabel}`;
-  }
-
-  getMemoryStats(): MemoryStats {
-    const activeSessions = this.sessions.size;
-    let totalMessages = 0;
-    let totalTokens = 0;
-    
-    for (const stats of this.sessions.values()) {
-      totalMessages += stats.messages;
-      totalTokens += stats.estimatedTokens;
-    }
-    
-    const averageTokensPerSession = activeSessions > 0 ? Math.round(totalTokens / activeSessions) : 0;
-    
-    return {
-      activeSessions,
-      totalMessages,
-      totalTokens,
-      averageTokensPerSession
-    };
-  }
-
-  cleanupOldSessions(maxAgeMs?: number): number {
-    const now = Date.now();
-    const CLEANUP_AGE = maxAgeMs || 4 * 60 * 60 * 1000; // 4 hours default
-    
-    let cleaned = 0;
-    for (const [sessionId, stats] of this.sessions.entries()) {
-      if (now - stats.lastUpdate.getTime() > CLEANUP_AGE) {
-        this.sessions.delete(sessionId);
-        cleaned++;
-      }
-    }
-    
-    return cleaned;
-  }
-
-
-  getAllStats(): Map<string, ContextStats> {
-    return new Map(this.sessions);
-  }
+  
+  cleanupOldSessions(maxAgeMs: number): number { return this.cleanupInactiveSessions(maxAgeMs); }
 }

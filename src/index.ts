@@ -140,7 +140,7 @@ async function runDiagnostics(): Promise<void> {
     // Exit with appropriate code
     process.exit(report.compatible ? 0 : 1);
   } catch (error) {
-    console.error("❌ Failed to generate diagnostic report:", error);
+    console.error("ERROR: Failed to generate diagnostic report:", error);
     process.exit(1);
   }
 }
@@ -156,9 +156,9 @@ async function performPreflightChecks(logger: ReturnType<typeof createLogger>): 
     );
     
     if (criticalIssues.length > 0) {
-      console.error("🚨 Critical issues detected that may prevent operation:");
+      console.error("CRITICAL: Issues detected that may prevent operation:");
       criticalIssues.forEach(issue => {
-        console.error(`   ❌ ${issue.message}`);
+        console.error(`   ERROR: ${issue.message}`);
         if (issue.solution) {
           console.error(`      → Solution: ${issue.solution}`);
         }
@@ -202,19 +202,19 @@ async function validateEnvironment(): Promise<void> {
   }
 
   if (errors.length > 0) {
-    console.error("❌ Environment validation failed:");
+    console.error("ERROR: Environment validation failed:");
     errors.forEach(error => console.error(`   • ${error}`));
     process.exit(1);
   }
 }
 
 async function runSetup(): Promise<void> {
-  console.error("🔧 ACP-Claude-Code Setup Wizard\n");
+  console.error("SETUP: ACP-Claude-Code Setup Wizard\n");
   
   try {
     const report = await DiagnosticSystem.generateReport();
     
-    console.error("✅ System Check:");
+    console.error("SUCCESS: System Check:");
     console.error(`   Platform: ${report.platform.platform} (${report.platform.arch})`);
     console.error(`   Node.js: ${report.platform.nodeVersion}`);
     console.error(`   Claude Code: ${report.claudeCode.available ? 'Found' : 'Not Found'}`);
@@ -222,55 +222,55 @@ async function runSetup(): Promise<void> {
     console.error(`   Score: ${report.score}/100\n`);
     
     if (!report.claudeCode.available) {
-      console.error("❌ Claude Code not found. Please install:");
+      console.error("ERROR: Claude Code not found. Please install:");
       console.error("   npm install -g @anthropic-ai/claude-code");
       console.error("   OR set ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE\n");
     }
     
     if (!report.claudeCode.authenticated) {
-      console.error("🔑 Authentication required. Run:");
+      console.error("AUTH: Authentication required. Run:");
       console.error("   claude setup-token\n");
     }
     
-    console.error("📝 Recommended Zed configuration:");
+    console.error("CONFIG: Recommended Zed configuration:");
     console.error('{\n  "agent_servers": {\n    "claude-code": {\n      "command": "npx",');
     console.error('      "args": ["@mrtkrcm/acp-claude-code"],\n      "env": {');
     console.error('        "ACP_PERMISSION_MODE": "acceptEdits"\n      }\n    }\n  }\n}');
     
     process.exit(report.compatible ? 0 : 1);
   } catch (error) {
-    console.error("❌ Setup failed:", error);
+    console.error("ERROR: Setup failed:", error);
     process.exit(1);
   }
 }
 
 async function runTest(): Promise<void> {
-  console.error("🧪 Testing ACP-Claude-Code Connection\n");
+  console.error("TEST: Testing ACP-Claude-Code Connection\n");
   
   try {
     const report = await DiagnosticSystem.generateReport();
     const metrics = DiagnosticSystem.getSystemMetrics();
     
-    console.error("📊 System Status:");
+    console.error("STATUS: System Status:");
     console.error(`   Memory: ${Math.round(metrics.memory.heapUsed / 1024 / 1024)}MB used`);
     console.error(`   Uptime: ${Math.round(metrics.uptime)}s`);
-    console.error(`   Compatible: ${report.compatible ? '✅' : '❌'}`);
+    console.error(`   Compatible: ${report.compatible ? 'Yes' : 'No'}`);
     
     if (report.claudeCode.available && report.claudeCode.authenticated) {
-      console.error("✅ Connection test passed");
+      console.error("SUCCESS: Connection test passed");
       process.exit(0);
     } else {
-      console.error("❌ Connection test failed");
+      console.error("ERROR: Connection test failed");
       process.exit(1);
     }
   } catch (error) {
-    console.error("❌ Test failed:", error);
+    console.error("ERROR: Test failed:", error);
     process.exit(1);
   }
 }
 
 async function resetPermissions(): Promise<void> {
-  console.error("🔄 Resetting permission settings\n");
+  console.error("RESET: Resetting permission settings\n");
   
   // For now, just show instructions since permissions are session-based
   console.error("Permission modes available:");

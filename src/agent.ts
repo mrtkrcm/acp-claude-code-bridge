@@ -36,6 +36,8 @@ import { MIME_TYPE_MAPPINGS } from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
 import { SessionPersistenceManager, getDefaultPersistenceManager } from "./session-persistence.js";
 import { createLogger, type Logger } from "./logger.js";
+import { CircuitBreaker, CLAUDE_SDK_CIRCUIT_OPTIONS } from './circuit-breaker.js';
+import { globalResourceManager } from './resource-manager.js';
 
 interface AgentSession {
   pendingPrompt: AsyncIterableIterator<SDKMessage> | null;
@@ -66,7 +68,7 @@ export class ClaudeACPAgent implements Agent {
   private clientCapabilities: ClientCapabilities = {};
   private extendedClientCapabilities: ExtendedClientCapabilities = {};
   private toolExecutionTiming: Map<string, ToolExecutionTiming> = new Map();
-  private streamingUpdates: Map<string, { chunks: string[]; totalSize?: number }> = new Map();
+  private streamingUpdates: Map<string, { chunks: string[]; totalSize?: number; lastActivity: number }> = new Map();
   
   // Session synchronization to prevent race conditions
   private sessionLocks: Map<string, Promise<unknown>> = new Map();
@@ -81,6 +83,7 @@ export class ClaudeACPAgent implements Agent {
   private readonly RETRY_DELAY_MS = 1000;
   private sessionPersistence: SessionPersistenceManager;
   private toolPermissions: ToolPermissionConfig = { defaultPermission: "allow" };
+  private claudeSDKCircuitBreaker: CircuitBreaker<{ prompt: string; options: Record<string, unknown> }, AsyncIterableIterator<SDKMessage>>;
 
   private static validateConfig() {
     const maxTurns = process.env.ACP_MAX_TURNS;
@@ -120,7 +123,7 @@ export class ClaudeACPAgent implements Agent {
     this.logger = createLogger('ClaudeACPAgent');
     
     this.validateConfiguration();
-    this.contextMonitor = new ContextMonitor(process.env.ACP_DEBUG === "true");
+    this.contextMonitor = new ContextMonitor();
     this.sessionPersistence = getDefaultPersistenceManager();
     
     this.logger.info(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`, {
@@ -146,6 +149,8 @@ export class ClaudeACPAgent implements Agent {
     
     // Initial cleanup on startup
     this.performSessionCleanup();
+    
+    this.claudeSDKCircuitBreaker = new CircuitBreaker(async (args) => query(args), CLAUDE_SDK_CIRCUIT_OPTIONS);
 
     // Streaming and batch cleanup (more frequent)
     this.streamingCleanupTimer = setInterval(() => {
@@ -154,18 +159,23 @@ export class ClaudeACPAgent implements Agent {
 
     this.batchCleanupTimer = setInterval(() => {
       this.cleanupStaleBatches();
-    }, 10 * 60 * 1000); // Every 10 minutes
+    }, 10 * 60 * 1000);
+  }
+
+  private getSession(sessionId: string): AgentSession {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.logger.debug(`Session ${sessionId} not found in map. Available: ${Array.from(this.sessions.keys()).join(", ")}`);
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    return session;
   }
 
   private parseMaxTurns(): number {
     const value = process.env.ACP_MAX_TURNS;
-    if (!value) return 100; // Default
-    
+    if (!value) return 100;
     const parsed = parseInt(value, 10);
-    if (isNaN(parsed) || parsed < 0) {
-      throw new Error(`Invalid ACP_MAX_TURNS: "${value}" must be a non-negative integer`);
-    }
-    
+    if (isNaN(parsed) || parsed < 0) throw new Error(`Invalid ACP_MAX_TURNS: "${value}" must be a non-negative integer`);
     return parsed;
   }
 
@@ -336,11 +346,19 @@ export class ClaudeACPAgent implements Agent {
 
   async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
     this.logger.info("Creating new session");
+    
+    if (!globalResourceManager.canStartOperation('new-session')) {
+      throw new Error('System resources exhausted - cannot create new session');
+    }
 
     // Create a session ID with timestamp for better uniqueness
     const timestamp = Date.now().toString(36);
     const random = Math.random().toString(36).substring(2);
     const sessionId = `${timestamp}-${random}`;
+    
+    if (!globalResourceManager.addSession(sessionId)) {
+      throw new Error('Maximum concurrent sessions reached');
+    }
 
     const sessionData = {
       pendingPrompt: null,
@@ -355,9 +373,10 @@ export class ClaudeACPAgent implements Agent {
     try {
       await this.sessionPersistence.saveSession({
         sessionId,
-        claudeSessionId: undefined, // Will be updated when first message is processed
+        claudeSessionId: undefined,
         permissionMode: this.defaultPermissionMode,
         createdAt: new Date().toISOString(),
+        lastAccessed: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
           version: '0.10.0'
@@ -371,9 +390,10 @@ export class ClaudeACPAgent implements Agent {
           try {
             await this.sessionPersistence.saveSession({
               sessionId,
-              claudeSessionId: undefined, // Will be updated when first message is processed
+              claudeSessionId: undefined,
               permissionMode: this.defaultPermissionMode,
               createdAt: new Date().toISOString(),
+              lastAccessed: new Date().toISOString(),
               metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.10.0' }
             });
           } catch (retryError) {
@@ -426,15 +446,7 @@ export class ClaudeACPAgent implements Agent {
           permissionMode: (persistedSession.permissionMode as typeof this.defaultPermissionMode) || this.defaultPermissionMode,
         });
         
-        // Restore context stats if available
-        if (persistedSession.contextStats) {
-          // Note: This would require expanding ContextMonitor to support restoration
-          this.logger.debug(`Context stats available for restoration`, {
-            sessionId: params.sessionId,
-            tokens: persistedSession.contextStats.estimatedTokens,
-            messages: persistedSession.contextStats.messages
-          });
-        }
+        // Context stats handled by ContextMonitor directly
         
         return;
       }
@@ -470,31 +482,49 @@ export class ClaudeACPAgent implements Agent {
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const currentSessionId = params.sessionId;
-    const session = this.sessions.get(currentSessionId);
+    
+    return this.withSessionLock(currentSessionId, async () => {
+      const session = this.getSession(currentSessionId);
 
-    if (!session) {
+      this.logger.debug(`Processing prompt for session: ${currentSessionId}`);
       this.logger.debug(
-        `Session ${currentSessionId} not found in map. Available sessions: ${Array.from(this.sessions.keys()).join(", ")}`,
+        `Session state: claudeSessionId=${session.claudeSessionId}, pendingPrompt=${!!session.pendingPrompt}, abortController=${!!session.abortController}`,
       );
-      this.logger.debug(`Available context sessions: ${Array.from(this.contextMonitor.getAllStats().keys()).join(", ")}`);
-      throw new Error(`Session ${currentSessionId} not found`);
-    }
+      this.logger.debug(
+        `Available sessions: ${Array.from(this.sessions.keys()).join(", ")}`,
+      );
 
-    this.logger.debug(`Processing prompt for session: ${currentSessionId}`);
-    this.logger.debug(
-      `Session state: claudeSessionId=${session.claudeSessionId}, pendingPrompt=${!!session.pendingPrompt}, abortController=${!!session.abortController}`,
-    );
-    this.logger.debug(
-      `Available sessions: ${Array.from(this.sessions.keys()).join(", ")}`,
-    );
+      if (session.pendingPrompt) {
+        this.logger.warn(`Session ${currentSessionId} is busy processing another prompt. Rejecting new prompt.`);
+        throw new Error(`Session is busy processing another prompt`);
+      }
 
-    // Cancel any pending prompt
-    if (session.abortController) {
-      session.abortController.abort();
-    }
+      // Cancel any pending prompt and wait for cleanup
+      if (session.abortController) {
+        session.abortController.abort();
+        // Give time for cleanup
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
 
-    session.abortController = new AbortController();
+      session.abortController = new AbortController();
 
+      const operationId = `prompt-${currentSessionId}-${Date.now()}`;
+      if (!globalResourceManager.startOperation(operationId)) {
+        throw new Error('System resources exhausted - cannot process prompt');
+      }
+      
+      try {
+        return await this.executePrompt(params, session, currentSessionId);
+      } finally {
+        globalResourceManager.finishOperation(operationId);
+      }
+    });
+  }
+
+  /**
+   * Execute a prompt with the Claude SDK
+   */
+  private async executePrompt(params: PromptRequest, session: AgentSession, currentSessionId: string): Promise<PromptResponse> {
     try {
       // Convert prompt content blocks to a single string
       const promptText = params.prompt
@@ -515,9 +545,7 @@ export class ClaudeACPAgent implements Agent {
         this.logger.debug(`Context warning: ${contextWarning.message}`);
         
         // Persist updated context stats
-        this.persistContextStats(currentSessionId).catch(error => {
-          this.logger.warn(`Failed to persist context stats: ${error}`, { sessionId: currentSessionId });
-        });
+        // Context stats managed by ContextMonitor
         
         // Send concise context status with safe property access
         const usage = contextWarning.usage || 0;
@@ -590,7 +618,7 @@ export class ClaudeACPAgent implements Agent {
       
       this.logger.debug(`Starting query with${this.maxTurns === 0 ? ' unlimited' : ` ${this.maxTurns}`} turns`);
       
-      const messages = query({
+      const messages = await this.claudeSDKCircuitBreaker.execute({
         prompt: queryInput,
         options: queryOptions,
       });
@@ -630,7 +658,7 @@ export class ClaudeACPAgent implements Agent {
                     sessionUpdate: "agent_message_chunk",
                     content: {
                       type: "text",
-                      text: `\n📊 Turn usage: ${turnCount}/${this.maxTurns} turns used. Continuing analysis...\n\n`,
+                      text: `\nTurn usage: ${turnCount}/${this.maxTurns} turns used. Continuing analysis...\n\n`,
                     },
                   },
                 });
@@ -660,7 +688,6 @@ export class ClaudeACPAgent implements Agent {
             // Update the session in the map to ensure persistence
             this.sessions.set(currentSessionId, session);
             
-            // ✅ FIX: Persist claudeSessionId immediately when obtained
             this.persistSessionState(currentSessionId).catch(error => {
               this.logger.warn(`Failed to persist claudeSessionId: ${error}`, { sessionId: currentSessionId });
             });
@@ -698,7 +725,6 @@ export class ClaudeACPAgent implements Agent {
       // Ensure the session is properly saved with the Claude session_id
       this.sessions.set(currentSessionId, session);
 
-      // ✅ FIX: Persist final session state including claudeSessionId for conversation continuity
       await this.persistSessionState(currentSessionId);
 
       return {
@@ -726,7 +752,7 @@ export class ClaudeACPAgent implements Agent {
           sessionUpdate: "agent_message_chunk",
           content: {
             type: "text",
-            text: `❌ **Error**: ${errorMessage}${contextInfo}\n\n*If this persists, try starting a new session.*`,
+            text: `**Error**: ${errorMessage}${contextInfo}\n\n*If this persists, try starting a new session.*`,
           },
         },
       });
@@ -738,16 +764,85 @@ export class ClaudeACPAgent implements Agent {
       session.pendingPrompt = null;
       session.abortController = null;
       
-      // ✅ FIX: Ensure session state is persisted even on error/cancellation
       this.persistSessionState(currentSessionId).catch(error => {
         this.logger.warn(`Failed to persist session state in finally block: ${error}`, { sessionId: currentSessionId });
       });
     }
   }
 
+  /**
+   * Health check method for monitoring system status
+   */
+  getHealthStatus(): {
+    status: 'healthy' | 'warning' | 'critical';
+    details: {
+      circuitBreaker: {
+        state: string;
+        failures: number;
+        successes: number;
+        totalCalls: number;
+      };
+      resources: {
+        memoryUsageMB: number;
+        concurrentOperations: number;
+        activeSessions: number;
+        healthStatus: string;
+      };
+      sessions: {
+        total: number;
+        active: number;
+        withClaudeId: number;
+      };
+    };
+  } {
+    const cbStats = this.claudeSDKCircuitBreaker.getStats();
+    const resourceStats = globalResourceManager.getStats();
+    const resourceHealth = globalResourceManager.getHealthStatus();
+    
+    // Count session states
+    let activePrompts = 0;
+    let withClaudeId = 0;
+    
+    for (const session of this.sessions.values()) {
+      if (session.pendingPrompt) activePrompts++;
+      if (session.claudeSessionId) withClaudeId++;
+    }
+    
+    // Overall health determination
+    let overallStatus: 'healthy' | 'warning' | 'critical' = 'healthy';
+    
+    if (cbStats.state !== 'CLOSED' || resourceHealth === 'critical') {
+      overallStatus = 'critical';
+    } else if (resourceHealth === 'warning' || cbStats.failures > 1) {
+      overallStatus = 'warning';
+    }
+    
+    return {
+      status: overallStatus,
+      details: {
+        circuitBreaker: {
+          state: cbStats.state,
+          failures: cbStats.failures,
+          successes: cbStats.successes,
+          totalCalls: cbStats.totalCalls,
+        },
+        resources: {
+          memoryUsageMB: resourceStats.memoryUsageMB,
+          concurrentOperations: resourceStats.concurrentOperations,
+          activeSessions: resourceStats.activeSessions,
+          healthStatus: resourceHealth,
+        },
+        sessions: {
+          total: this.sessions.size,
+          active: activePrompts,
+          withClaudeId: withClaudeId,
+        },
+      },
+    };
+  }
+
   async cancel(params: CancelNotification): Promise<void> {
     this.logger.debug(`Cancel requested for session: ${params.sessionId}`);
-
     const session = this.sessions.get(params.sessionId);
     if (session) {
       session.abortController?.abort();
@@ -1385,7 +1480,7 @@ export class ClaudeACPAgent implements Agent {
         const session = this.sessions.get(sessionId);
         if (selectedOption === 'always' && session) {
           session.permissionMode = 'acceptEdits';
-          this.logger.debug(`⚙️ Switched to acceptEdits mode for future similar operations`);
+          this.logger.debug(`Switched to acceptEdits mode for future similar operations`);
         }
         
         return selectedOption === 'allow' || selectedOption === 'always' ? 'allowed' : 'denied';
@@ -1451,9 +1546,9 @@ export class ClaudeACPAgent implements Agent {
         description = `${toolName} operation on: ${filePath}`;
         
         if (toolName.toLowerCase().includes('write') || toolName.toLowerCase().includes('edit')) {
-          riskLevel = '⚠️ Modifies files';
+          riskLevel = 'WARNING: Modifies files';
         } else if (toolName.toLowerCase().includes('delete')) {
-          riskLevel = '🚨 Deletes files';
+          riskLevel = 'DANGER: Deletes files';
         }
       }
       
@@ -1461,7 +1556,7 @@ export class ClaudeACPAgent implements Agent {
       else if (inputObj.command) {
         const command = String(inputObj.command);
         description = `Execute command: ${command}`;
-        riskLevel = '🚨 Executes system commands';
+        riskLevel = 'DANGER: Executes system commands';
       }
       
       // Content operations
@@ -1769,7 +1864,7 @@ export class ClaudeACPAgent implements Agent {
                 type: "content",
                 content: {
                   type: "text",
-                  text: `⚠️ ACP direct operation failed: ${error instanceof Error ? error.message : String(error)}.\nFalling back to Claude tools for compatibility.`,
+                  text: `WARNING: ACP direct operation failed: ${error instanceof Error ? error.message : String(error)}.\nFalling back to Claude tools for compatibility.`,
                 },
               },
             ],
@@ -2048,6 +2143,7 @@ export class ClaudeACPAgent implements Agent {
       // Remove sessions that have no context data and no Claude session
       if (!activeContextSessions.has(sessionId) && !session.claudeSessionId) {
         this.sessions.delete(sessionId);
+        globalResourceManager.removeSession(sessionId);
         cleanedCount++;
       }
     }
@@ -2068,7 +2164,7 @@ export class ClaudeACPAgent implements Agent {
       return `Session ${sessionId}: Not found`;
     }
     
-    const status = session.pendingPrompt ? '🔄 Active' : '💤 Idle';
+    const status = session.pendingPrompt ? 'Active' : 'Idle';
     const permission = session.permissionMode || this.defaultPermissionMode;
     const claudeSession = session.claudeSessionId ? `Claude:${session.claudeSessionId.substring(0, 8)}` : 'New';
     
@@ -2374,6 +2470,7 @@ export class ClaudeACPAgent implements Agent {
     this.streamingUpdates.set(toolCallId, {
       chunks: [],
       totalSize: estimatedSize,
+      lastActivity: Date.now(),
     });
   }
 
@@ -2382,6 +2479,7 @@ export class ClaudeACPAgent implements Agent {
     if (!streaming) return;
     
     streaming.chunks.push(chunk);
+    streaming.lastActivity = Date.now();
     
     // Send streaming update
     const updatePromise = this.client.sessionUpdate({
@@ -2421,28 +2519,6 @@ export class ClaudeACPAgent implements Agent {
     return `batch_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   }
 
-  private async persistContextStats(sessionId: string): Promise<void> {
-    const contextStats = this.contextMonitor.getStats(sessionId);
-    if (!contextStats) return;
-    
-    try {
-      const existingSession = await this.sessionPersistence.loadSession(sessionId);
-      if (existingSession) {
-        await this.sessionPersistence.saveSession({
-          ...existingSession,
-          contextStats: {
-            estimatedTokens: contextStats.estimatedTokens,
-            messages: contextStats.messages,
-            turnCount: contextStats.turnCount,
-            lastUpdate: contextStats.lastUpdate.toISOString()
-          }
-        });
-      }
-    } catch (error) {
-      // Don't throw - this is a background operation
-      this.logger.warn(`Context stats persistence failed: ${error}`, { sessionId });
-    }
-  }
 
   private async persistSessionState(sessionId: string, maxRetries = 3): Promise<void> {
     const session = this.sessions.get(sessionId);
@@ -2454,7 +2530,6 @@ export class ClaudeACPAgent implements Agent {
       try {
         const existingSession = await this.sessionPersistence.loadSession(sessionId);
         if (existingSession) {
-          // ✅ FIX: Save the critical claudeSessionId for conversation continuity
           await this.sessionPersistence.saveSession({
             ...existingSession,
             claudeSessionId: session.claudeSessionId,
@@ -2979,7 +3054,7 @@ export class ClaudeACPAgent implements Agent {
     let cleanedCount = 0;
     for (const [toolCallId, streaming] of this.streamingUpdates.entries()) {
       // Remove if too old (no activity for 30 minutes)
-      if (now - (streaming.totalSize || 0) > STALE_THRESHOLD) {
+      if (now - streaming.lastActivity > STALE_THRESHOLD) {
         this.streamingUpdates.delete(toolCallId);
         cleanedCount++;
       }
@@ -3014,23 +3089,29 @@ export class ClaudeACPAgent implements Agent {
    * Synchronize session operations to prevent race conditions
    */
   private async withSessionLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
-    // Wait for any existing operation on this session
+    // Wait for any existing operation on this session (with timeout)
     const existingLock = this.sessionLocks.get(sessionId);
     if (existingLock) {
-      await existingLock.catch(() => {}); // Ignore errors from previous operations
+      const timeout = new Promise<void>((_, reject) => 
+        setTimeout(() => reject(new Error(`Session lock timeout for ${sessionId}`)), 30000)
+      );
+      
+      await Promise.race([existingLock, timeout])
+        .catch(() => {}); // Ignore errors from previous operations or timeout
     }
 
-    // Create new operation promise
-    const operationPromise = operation();
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Session operation timeout for ${sessionId}`)), 60000)
+    );
+    
+    const operationPromise = Promise.race([operation(), timeoutPromise]);
     this.sessionLocks.set(sessionId, operationPromise);
 
     try {
       return await operationPromise;
     } finally {
-      // Only clear lock if it's still our operation
-      if (this.sessionLocks.get(sessionId) === operationPromise) {
-        this.sessionLocks.delete(sessionId);
-      }
+      // Always clear the lock to prevent memory leaks
+      this.sessionLocks.delete(sessionId);
     }
   }
 
@@ -3040,7 +3121,7 @@ export class ClaudeACPAgent implements Agent {
   private performSessionCleanup(): void {
     try {
       // Only cleanup context monitor sessions older than Claude Code's typical timeout
-      const cleanedCount = this.contextMonitor.cleanupOldSessions(4 * 60 * 60 * 1000); // 4 hours
+      const cleanedCount = this.contextMonitor.cleanupInactiveSessions(4 * 60 * 60 * 1000);
       if (cleanedCount > 0) {
         this.logger.debug(`Cleaned up ${cleanedCount} orphaned context sessions`);
       }
@@ -3084,6 +3165,7 @@ export class ClaudeACPAgent implements Agent {
         
         this.sessions.delete(sessionId);
         this.contextMonitor.clearSession(sessionId);
+        globalResourceManager.removeSession(sessionId);
         
         this.logger.debug(`Removed inactive session: ${sessionId}`);
       }

@@ -132,8 +132,8 @@ describe('DiagnosticSystem', () => {
       expect(formatted).toContain('Platform Information')
       expect(formatted).toContain('Claude Code Status')
       
-      // Should contain emoji indicators
-      expect(formatted).toMatch(/[✅❌⚠️🚨]/u)
+      // Should contain status indicators
+      expect(formatted).toMatch(/\[(OK|ERROR)\]/u)
     })
 
     it('should show different status for compatible vs incompatible systems', async () => {
@@ -141,9 +141,9 @@ describe('DiagnosticSystem', () => {
       const formatted = DiagnosticSystem.formatReport(report)
       
       if (report.compatible) {
-        expect(formatted).toContain('✅ Overall Status: COMPATIBLE')
+        expect(formatted).toContain('[OK] Overall Status: COMPATIBLE')
       } else {
-        expect(formatted).toContain('❌ Overall Status: ISSUES FOUND')
+        expect(formatted).toContain('[ERROR] Overall Status: ISSUES FOUND')
       }
     })
   })
