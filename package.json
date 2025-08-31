@@ -53,7 +53,7 @@
   "author": "Murat <karacamjr@gmail.com>",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/claude-code": "latest",
+    "@anthropic-ai/claude-code": "^1.2.3",
     "@zed-industries/agent-client-protocol": "0.1.2"
   },
   "devDependencies": {

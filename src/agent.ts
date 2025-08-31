@@ -86,6 +86,8 @@ export class ClaudeACPAgent implements Agent {
     this.defaultPermissionMode = this.parsePermissionMode();
     this.pathToClaudeCodeExecutable = process.env.ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE;
     
+    this.validateConfiguration();
+    
     this.contextMonitor = new ContextMonitor(this.DEBUG);
     this.sessionPersistence = getDefaultPersistenceManager();
     this.initializeLogging();
@@ -123,6 +125,27 @@ export class ClaudeACPAgent implements Agent {
   private parsePermissionMode(): "default" | "acceptEdits" | "bypassPermissions" | "plan" {
     const mode = process.env.ACP_PERMISSION_MODE as "default" | "acceptEdits" | "bypassPermissions" | "plan";
     return mode || "default";
+  }
+
+  private validateConfiguration(): void {
+    // Validate max turns
+    if (this.maxTurns < 0) {
+      throw new Error(`Invalid maxTurns: ${this.maxTurns} must be >= 0`);
+    }
+    
+    // Validate permission mode
+    const validModes = ["default", "acceptEdits", "bypassPermissions", "plan"];
+    if (!validModes.includes(this.defaultPermissionMode)) {
+      throw new Error(`Invalid permission mode: ${this.defaultPermissionMode}`);
+    }
+    
+    // Memory check
+    const usage = process.memoryUsage();
+    if (usage.heapUsed > 200 * 1024 * 1024) { // 200MB
+      this.log(`High initial memory usage: ${Math.round(usage.heapUsed / 1024 / 1024)}MB`, 'WARN');
+    }
+    
+    this.log('Configuration validated successfully', 'INFO');
   }
 
   private detectExtendedCapabilities(params: InitializeRequest): ExtendedClientCapabilities {
@@ -786,16 +809,26 @@ export class ClaudeACPAgent implements Agent {
                   status: string;
                   activeForm: string;
                 }>;
-                let todoText = "📝 Todo List:\n";
+                // Create enhanced todo display with ASCII indicators
+                const completedCount = todos.filter(t => t.status === 'completed').length;
+                const totalCount = todos.length;
+                const progressPercent = Math.round((completedCount / totalCount) * 100);
+                
+                let todoText = `[*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%) \n`;
+                todoText += `${'='.repeat(40)}\n`;
+                
                 todos.forEach((todo, index) => {
-                  const statusEmoji =
+                  const statusIndicator =
                     todo.status === "completed"
-                      ? "✅"
+                      ? "[✓]"
                       : todo.status === "in_progress"
-                        ? "🔄"
-                        : "⏳";
-                  todoText += `${index + 1}. ${statusEmoji} ${todo.content}\n`;
+                        ? "[~]"
+                        : "[ ]";
+                  const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
+                  todoText += `${taskNumber}. ${statusIndicator} ${todo.content}\n`;
                 });
+                
+                todoText += `${'='.repeat(40)}`;
 
                 await this.client.sessionUpdate({
                   sessionId,
@@ -1017,16 +1050,32 @@ export class ClaudeACPAgent implements Agent {
             }
           ).todos;
           if (todos && Array.isArray(todos)) {
-            let todoText = "\n📝 Todo List Update:\n";
+            // Enhanced todo update display
+            const completedCount = todos.filter(t => t.status === 'completed').length;
+            const totalCount = todos.length;
+            const progressPercent = Math.round((completedCount / totalCount) * 100);
+            
+            let todoText = `\n[*] Task Update: ${completedCount}/${totalCount} complete (${progressPercent}%)\n`;
+            todoText += `${'-'.repeat(35)}\n`;
+            
             todos.forEach((todo, index) => {
-              const statusEmoji =
+              const statusIndicator =
                 todo.status === "completed"
-                  ? "✅"
+                  ? "[✓]"
                   : todo.status === "in_progress"
-                    ? "🔄"
-                    : "⏳";
-              todoText += `  ${index + 1}. ${statusEmoji} ${todo.content}\n`;
+                    ? "[~]"
+                    : "[ ]";
+              const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
+              todoText += `  ${taskNumber}. ${statusIndicator} ${todo.content}\n`;
             });
+            
+            // Add status summary
+            const pendingCount = todos.filter(t => t.status === 'pending').length;
+            const inProgressCount = todos.filter(t => t.status === 'in_progress').length;
+            if (pendingCount > 0 || inProgressCount > 0) {
+              todoText += `${'-'.repeat(35)}\n`;
+              todoText += `Status: ${inProgressCount} active, ${pendingCount} pending, ${completedCount} done\n`;
+            }
 
             await this.client.sessionUpdate({
               sessionId,
