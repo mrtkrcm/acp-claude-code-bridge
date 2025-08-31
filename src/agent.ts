@@ -329,7 +329,24 @@ export class ClaudeACPAgent implements Agent {
         }
       });
     } catch (error) {
-      this.logger.warn(`Failed to persist session metadata: ${error}`, { sessionId });
+      // Auto-retry session save on connection errors
+      if (String(error).includes('connection') || String(error).includes('timeout')) {
+        this.logger.warn(`Session save error, retrying: ${error}`, { sessionId });
+        setTimeout(async () => {
+          try {
+            await this.sessionPersistence.saveSession({
+              sessionId,
+              permissionMode: this.defaultPermissionMode,
+              createdAt: new Date().toISOString(),
+              metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.7.1' }
+            });
+          } catch (retryError) {
+            this.logger.warn(`Session save retry failed: ${retryError}`, { sessionId });
+          }
+        }, 1000);
+      } else {
+        this.logger.warn(`Failed to persist session metadata: ${error}`, { sessionId });
+      }
     }
 
     this.logger.info(`Created session: ${sessionId}`, { sessionId, permissionMode: this.defaultPermissionMode });
@@ -798,7 +815,6 @@ export class ClaudeACPAgent implements Agent {
                 }>;
                 const completedCount = todos.filter(t => t.status === 'completed').length;
                 const totalCount = todos.length;
-                const progressPercent = Math.round((completedCount / totalCount) * 100);
                 
                 const todoText = this.generateTaskProgressDisplay(todos, completedCount, totalCount);
 
@@ -1033,7 +1049,6 @@ export class ClaudeACPAgent implements Agent {
             // Convert todo objects to clean strings to prevent [object Object] display
             const completedCount = todos.filter(t => t.status === 'completed').length;
             const totalCount = todos.length;
-            const progressPercent = Math.round((completedCount / totalCount) * 100);
             
             const todoText = this.generateTaskProgressDisplay(todos, completedCount, totalCount);
 
@@ -1429,20 +1444,20 @@ export class ClaudeACPAgent implements Agent {
     const progressBar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
     
     // Header with progress bar
-    let display = `\n┌─ 📋 Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
-    display += `├─ [${progressBar}] ${progressPercent}%\n`;
+    let display = `\n+-- [*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
+    display += `|   [${progressBar}] ${progressPercent}%\n`;
     
     if (inProgressCount > 0) {
-      display += `├─ ⚡ Currently working on ${inProgressCount} task${inProgressCount > 1 ? 's' : ''}\n`;
+      display += `|   >> Currently working on ${inProgressCount} task${inProgressCount > 1 ? 's' : ''}\n`;
     }
     
-    display += `├─${'─'.repeat(50)}\n`;
+    display += `+--${'-'.repeat(50)}\n`;
     
     // Task list with better icons and formatting
     todos.forEach((todo, index) => {
       const statusIcon = 
-        todo.status === "completed" ? "✅" :
-        todo.status === "in_progress" ? "⚡" : "⏳";
+        todo.status === "completed" ? "[x]" :
+        todo.status === "in_progress" ? "[~]" : "[ ]";
       
       const statusText =
         todo.status === "completed" ? "DONE" :
@@ -1454,10 +1469,10 @@ export class ClaudeACPAgent implements Agent {
       // Truncate long content for better readability
       const truncatedContent = content.length > 60 ? content.substring(0, 57) + '...' : content;
       
-      display += `├─ ${taskNumber}. [${statusText}] ${statusIcon} ${truncatedContent}\n`;
+      display += `|   ${taskNumber}. [${statusText}] ${statusIcon} ${truncatedContent}\n`;
     });
     
-    display += `└─${('─'.repeat(50))}\n`;
+    display += `+--${('-'.repeat(50))}\n`;
     
     return display;
   }

@@ -12,6 +12,24 @@ export async function main() {
     return;
   }
 
+  // Check for setup mode
+  if (process.argv.includes('--setup')) {
+    await runSetup();
+    return;
+  }
+
+  // Check for test mode
+  if (process.argv.includes('--test')) {
+    await runTest();
+    return;
+  }
+
+  // Check for reset permissions
+  if (process.argv.includes('--reset-permissions')) {
+    await resetPermissions();
+    return;
+  }
+
   // Validate environment early
   await validateEnvironment();
 
@@ -188,6 +206,83 @@ async function validateEnvironment(): Promise<void> {
     errors.forEach(error => console.error(`   • ${error}`));
     process.exit(1);
   }
+}
+
+async function runSetup(): Promise<void> {
+  console.error("🔧 ACP-Claude-Code Setup Wizard\n");
+  
+  try {
+    const report = await DiagnosticSystem.generateReport();
+    
+    console.error("✅ System Check:");
+    console.error(`   Platform: ${report.platform.platform} (${report.platform.arch})`);
+    console.error(`   Node.js: ${report.platform.nodeVersion}`);
+    console.error(`   Claude Code: ${report.claudeCode.available ? 'Found' : 'Not Found'}`);
+    console.error(`   Authentication: ${report.claudeCode.authenticated ? 'Ready' : 'Required'}`);
+    console.error(`   Score: ${report.score}/100\n`);
+    
+    if (!report.claudeCode.available) {
+      console.error("❌ Claude Code not found. Please install:");
+      console.error("   npm install -g @anthropic-ai/claude-code");
+      console.error("   OR set ACP_PATH_TO_CLAUDE_CODE_EXECUTABLE\n");
+    }
+    
+    if (!report.claudeCode.authenticated) {
+      console.error("🔑 Authentication required. Run:");
+      console.error("   claude setup-token\n");
+    }
+    
+    console.error("📝 Recommended Zed configuration:");
+    console.error('{\n  "agent_servers": {\n    "claude-code": {\n      "command": "npx",');
+    console.error('      "args": ["@mrtkrcm/acp-claude-code"],\n      "env": {');
+    console.error('        "ACP_PERMISSION_MODE": "acceptEdits"\n      }\n    }\n  }\n}');
+    
+    process.exit(report.compatible ? 0 : 1);
+  } catch (error) {
+    console.error("❌ Setup failed:", error);
+    process.exit(1);
+  }
+}
+
+async function runTest(): Promise<void> {
+  console.error("🧪 Testing ACP-Claude-Code Connection\n");
+  
+  try {
+    const report = await DiagnosticSystem.generateReport();
+    const metrics = DiagnosticSystem.getSystemMetrics();
+    
+    console.error("📊 System Status:");
+    console.error(`   Memory: ${Math.round(metrics.memory.heapUsed / 1024 / 1024)}MB used`);
+    console.error(`   Uptime: ${Math.round(metrics.uptime)}s`);
+    console.error(`   Compatible: ${report.compatible ? '✅' : '❌'}`);
+    
+    if (report.claudeCode.available && report.claudeCode.authenticated) {
+      console.error("✅ Connection test passed");
+      process.exit(0);
+    } else {
+      console.error("❌ Connection test failed");
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error("❌ Test failed:", error);
+    process.exit(1);
+  }
+}
+
+async function resetPermissions(): Promise<void> {
+  console.error("🔄 Resetting permission settings\n");
+  
+  // For now, just show instructions since permissions are session-based
+  console.error("Permission modes available:");
+  console.error("  • default - Ask for each operation");
+  console.error("  • acceptEdits - Auto-accept file edits");
+  console.error("  • bypassPermissions - Allow all operations");
+  console.error("\nSet via environment variable:");
+  console.error("  ACP_PERMISSION_MODE=acceptEdits");
+  console.error("\nOr use runtime markers:");
+  console.error("  [ACP:PERMISSION:ACCEPT_EDITS]");
+  
+  process.exit(0);
 }
 
 export { ClaudeACPAgent };
