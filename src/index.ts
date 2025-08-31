@@ -6,7 +6,7 @@ import { DiagnosticSystem } from "./diagnostics.js";
 import { createLogger } from "./logger.js";
 
 export async function main() {
-  // Check for diagnostic mode first
+  // Check for diagnostic mode FIRST - before any setup
   if (process.argv.includes('--diagnose')) {
     await runDiagnostics();
     return;
@@ -30,7 +30,7 @@ export async function main() {
     return;
   }
 
-  // Validate environment early
+  // Validate environment early (only for normal operation)
   await validateEnvironment();
 
   // Add process debugging for Zed startup issues

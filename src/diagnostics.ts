@@ -86,6 +86,14 @@ export class DiagnosticSystem {
         timeout: 5000  // 5 second timeout
       });
       let output = '';
+      let resolved = false;
+      
+      const resolveOnce = (value: string | null) => {
+        if (!resolved) {
+          resolved = true;
+          resolve(value);
+        }
+      };
       
       child.stdout?.on('data', (data) => {
         output += data.toString();
@@ -94,23 +102,42 @@ export class DiagnosticSystem {
       child.on('close', (code) => {
         if (code === 0 && output.trim()) {
           const path = output.trim().split('\n')[0]; // First result on Windows 'where'
-          resolve(path);
+          resolveOnce(path);
         } else {
-          resolve(null);
+          resolveOnce(null);
         }
       });
       
       child.on('error', (err) => {
         console.warn(`Path detection failed: ${err.message}`);
-        resolve(null);
+        resolveOnce(null);
       });
+      
+      // Additional timeout safety net
+      setTimeout(() => {
+        if (!resolved) {
+          child.kill('SIGKILL');
+          resolveOnce(null);
+        }
+      }, 6000);
     });
   }
 
   static async getClaudeVersion(executablePath: string): Promise<string | null> {
     return new Promise((resolve) => {
-      const child = spawn(executablePath, ['--version'], { stdio: 'pipe' });
+      const child = spawn(executablePath, ['--version'], { 
+        stdio: 'pipe',
+        timeout: 5000  // 5 second timeout
+      });
       let output = '';
+      let resolved = false;
+      
+      const resolveOnce = (value: string | null) => {
+        if (!resolved) {
+          resolved = true;
+          resolve(value);
+        }
+      };
       
       child.stdout?.on('data', (data) => {
         output += data.toString();
@@ -120,13 +147,21 @@ export class DiagnosticSystem {
         if (code === 0) {
           // Extract version from output like "1.0.98 (Claude Code)"
           const match = output.match(/(\d+\.\d+\.\d+)/);
-          resolve(match ? match[1] : output.trim());
+          resolveOnce(match ? match[1] : output.trim());
         } else {
-          resolve(null);
+          resolveOnce(null);
         }
       });
       
-      child.on('error', () => resolve(null));
+      child.on('error', () => resolveOnce(null));
+      
+      // Additional timeout safety net
+      setTimeout(() => {
+        if (!resolved) {
+          child.kill('SIGKILL');
+          resolveOnce(null);
+        }
+      }, 6000);
     });
   }
 
