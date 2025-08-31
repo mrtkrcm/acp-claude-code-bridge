@@ -15,20 +15,24 @@ export class SessionPersistenceManager {
   private readonly maxSessions: number;
   private readonly maxAge: number;
   
+  private cleanupRegistered = false;
+
   constructor(config: SessionPersistenceConfig = {}) {
-    this.baseDir = config.baseDir || resolve(homedir(), '.acp-claude-code', 'sessions');
+    this.baseDir = config.baseDir || process.env.ACP_SESSIONS_DIR || resolve(homedir(), '.acp-claude-code', 'sessions');
     this.maxSessions = config.maxSessions || 100;
     this.maxAge = config.maxAge || 7 * 24 * 60 * 60 * 1000;
-    this.ensureDirectoryExists();
     this.cleanupTempFiles().catch(() => {});
     this.registerCleanupHandlers();
   }
   
-  private ensureDirectoryExists(): void {
-    if (!existsSync(this.baseDir)) { mkdir(this.baseDir, { recursive: true }).catch(() => {}); }
+  private async ensureDirectoryExists(): Promise<void> {
+    if (!existsSync(this.baseDir)) { 
+      await mkdir(this.baseDir, { recursive: true }); 
+    }
   }
   
   async saveSession(sessionData: PersistedSessionData): Promise<void> {
+    await this.ensureDirectoryExists();
     const sessionPath = resolve(this.baseDir, `${sessionData.sessionId}.json`);
     const tempPath = `${sessionPath}.tmp.${Date.now()}.${process.pid}`;
     
@@ -52,6 +56,29 @@ export class SessionPersistenceManager {
     } catch { return null; }
   }
   
+  async cleanupInactiveSessions(maxAge?: number): Promise<number> {
+    const ageThreshold = maxAge || this.maxAge;
+    let removed = 0;
+    try {
+      const files = await readdir(this.baseDir);
+      const sessionFiles = files.filter(f => f.endsWith('.json') && !f.includes('.tmp.'));
+      const now = Date.now();
+      
+      for (const file of sessionFiles) {
+        try {
+          const filePath = resolve(this.baseDir, file);
+          const stats = await stat(filePath);
+          if (now - stats.mtime.getTime() > ageThreshold) { 
+            await unlink(filePath); 
+            removed++; 
+          }
+        } catch { /* ignore file errors */ }
+      }
+    } catch { /* ignore directory errors */ }
+    
+    return removed;
+  }
+
   async cleanup(): Promise<{ removed: number; errors: number }> {
     let removed = 0, errors = 0;
     try {
@@ -103,6 +130,9 @@ export class SessionPersistenceManager {
   }
   
   private registerCleanupHandlers(): void {
+    if (this.cleanupRegistered) return;
+    this.cleanupRegistered = true;
+    
     const cleanup = () => { this.cleanupTempFiles().catch(() => {}); };
     process.once('exit', cleanup); process.once('SIGINT', cleanup); process.once('SIGTERM', cleanup);
     process.once('uncaughtException', cleanup); process.once('unhandledRejection', cleanup);
@@ -111,6 +141,13 @@ export class SessionPersistenceManager {
 
 let defaultManager: SessionPersistenceManager | null = null;
 export function getDefaultPersistenceManager(): SessionPersistenceManager {
-  if (!defaultManager) defaultManager = new SessionPersistenceManager();
+  if (!defaultManager) {
+    const config = process.env.ACP_SESSIONS_DIR ? { baseDir: process.env.ACP_SESSIONS_DIR } : {};
+    defaultManager = new SessionPersistenceManager(config);
+  }
   return defaultManager;
+}
+
+export function resetDefaultPersistenceManager(): void {
+  defaultManager = null;
 }
