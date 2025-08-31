@@ -836,14 +836,14 @@ export class ClaudeACPAgent implements Agent {
                 const todos = content.input.todos as Array<{
                   content: string;
                   status: string;
-                  activeForm: string;
+                  id: string;
                 }>;
-                        const completedCount = todos.filter(t => t.status === 'completed').length;
+                const completedCount = todos.filter(t => t.status === 'completed').length;
                 const totalCount = todos.length;
                 const progressPercent = Math.round((completedCount / totalCount) * 100);
                 
-                let todoText = `[*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%) \n`;
-                todoText += `${'='.repeat(40)}\n`;
+                let todoText = `[*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
+                todoText += `${'─'.repeat(40)}\n`;
                 
                 todos.forEach((todo, index) => {
                   const statusIndicator =
@@ -853,21 +853,31 @@ export class ClaudeACPAgent implements Agent {
                         ? "[~]"
                         : "[ ]";
                   const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
-                  todoText += `${taskNumber}. ${statusIndicator} ${todo.content}\n`;
+                  // Ensure all values are properly stringified to prevent [object Object]
+                  const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
+                  todoText += `${taskNumber}. ${statusIndicator} ${content}\n`;
                 });
                 
-                todoText += `${'='.repeat(40)}`;
+                todoText += `${'─'.repeat(40)}`;
 
-                await this.client.sessionUpdate({
+                // Use proper content format with promise handling
+                const updatePromise = this.client.sessionUpdate({
                   sessionId,
                   update: {
                     sessionUpdate: "agent_message_chunk",
                     content: {
-                      type: "text",
-                      text: todoText + "\n",
+                      type: "text" as const,
+                      text: todoText,
                     },
                   },
                 });
+
+                // Handle promise properly
+                if (updatePromise?.catch) {
+                  updatePromise.catch(error => {
+                    this.log(`Error sending todo update: ${error}`, 'WARN');
+                  });
+                }
               }
             }
           }
@@ -1072,17 +1082,18 @@ export class ClaudeACPAgent implements Agent {
               todos: Array<{
                 content: string;
                 status: string;
-                activeForm: string;
+                id: string;
               }>;
             }
           ).todos;
           if (todos && Array.isArray(todos)) {
+            // Convert todo objects to clean strings to prevent [object Object] display
             const completedCount = todos.filter(t => t.status === 'completed').length;
             const totalCount = todos.length;
             const progressPercent = Math.round((completedCount / totalCount) * 100);
             
-            let todoText = `\n[*] Task Update: ${completedCount}/${totalCount} complete (${progressPercent}%)\n`;
-            todoText += `${'-'.repeat(35)}\n`;
+            let todoText = `[*] Task Progress: ${completedCount}/${totalCount} (${progressPercent}%)\n`;
+            todoText += `${'─'.repeat(40)}\n`;
             
             todos.forEach((todo, index) => {
               const statusIndicator =
@@ -1092,27 +1103,34 @@ export class ClaudeACPAgent implements Agent {
                     ? "[~]"
                     : "[ ]";
               const taskNumber = `${(index + 1).toString().padStart(2, '0')}`;
-              todoText += `  ${taskNumber}. ${statusIndicator} ${todo.content}\n`;
+              // Ensure all values are properly stringified to prevent [object Object]
+              const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
+              todoText += `${taskNumber}. ${statusIndicator} ${content}\n`;
             });
             
-            // Add status summary
-            const pendingCount = todos.filter(t => t.status === 'pending').length;
-            const inProgressCount = todos.filter(t => t.status === 'in_progress').length;
-            if (pendingCount > 0 || inProgressCount > 0) {
-              todoText += `${'-'.repeat(35)}\n`;
-              todoText += `Status: ${inProgressCount} active, ${pendingCount} pending, ${completedCount} done\n`;
-            }
+            todoText += `${'─'.repeat(40)}`;
 
-            await this.client.sessionUpdate({
+            // Use proper content format and add delay to prevent message flooding
+            const updatePromise = this.client.sessionUpdate({
               sessionId,
               update: {
                 sessionUpdate: "agent_message_chunk",
                 content: {
-                  type: "text",
+                  type: "text" as const,
                   text: todoText,
                 },
               },
             });
+
+            // Handle promise properly to avoid unhandled rejections
+            if (updatePromise?.catch) {
+              updatePromise.catch(error => {
+                this.log(`Error sending todo update: ${error}`, 'WARN');
+              });
+            }
+            
+            // Add small delay to prevent message flooding in Zed UI
+            await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
         break;
