@@ -177,6 +177,8 @@ export class ClaudeACPAgent implements Agent {
   }
 
   private async executePrompt(params: PromptRequest, session: AgentSession, sessionId: string): Promise<PromptResponse> {
+    let operationId: string | undefined;
+    
     try {
       const promptText = params.prompt
         .filter((block): block is { type: "text"; text: string } => block.type === "text")
@@ -212,7 +214,8 @@ export class ClaudeACPAgent implements Agent {
         },
       });
       
-      const operationId = `claude-query-${sessionId}-${Date.now()}`;
+      // Resource management for message processing
+      operationId = `claude-query-${sessionId}-${Date.now()}`;
       if (!globalResourceManager.startOperation(operationId)) {
         throw new Error('System resources exhausted - cannot execute Claude query');
       }
@@ -225,8 +228,7 @@ export class ClaudeACPAgent implements Agent {
           options: queryOptions,
         });
         
-        globalResourceManager.finishOperation(operationId);
-        // Continue with message processing
+        // Keep operation active during message processing
       } catch (error) {
         globalResourceManager.finishOperation(operationId);
         throw error;
@@ -261,6 +263,9 @@ export class ClaudeACPAgent implements Agent {
       await this.sendErrorMessage(sessionId, error);
       return { stopReason: "end_turn" };
     } finally {
+      if (operationId) {
+        globalResourceManager.finishOperation(operationId);
+      }
       session.pendingPrompt = null;
       session.abortController = null;
     }

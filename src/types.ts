@@ -1,6 +1,23 @@
 // Re-export all types from the agent-client-protocol
 export * from "@zed-industries/agent-client-protocol";
 
+// Import specific types for local use
+import type { 
+  PlanEntry as ACPPlanEntry, 
+  ToolCallLocation as ACPToolCallLocation,
+  ToolCallContent as ACPToolCallContent,
+  PermissionOption as ACPPermissionOption
+} from "@zed-industries/agent-client-protocol";
+
+// Re-export with local names for convenience
+export type PlanEntry = ACPPlanEntry;
+export type ToolCallLocation = ACPToolCallLocation;
+export type ToolCallContent = ACPToolCallContent;
+export type PermissionOption = ACPPermissionOption;
+
+// Manual type definition since it's not exported
+export type PermissionOptionKind = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+
 // Import Zod for runtime validation
 import { z } from 'zod';
 
