@@ -1570,7 +1570,7 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
-   * Generate optimized single-line task progress display with better ASCII icons.
+   * Generate system message banner for task progress with clear agent identification.
    */
   private generateTaskProgressDisplay(
     todos: Array<{
@@ -1583,27 +1583,30 @@ export class ClaudeACPAgent implements Agent {
   ): string {
     // Find current and next tasks for enhanced display
     const currentTask = todos.find(t => t.status === 'in_progress');
+    
+    let taskStatus: string;
     if (!currentTask) {
-      return `[✓] All ${totalCount} tasks completed`;
+      taskStatus = `[✓] All ${totalCount} tasks completed`;
+    } else {
+      const currentTaskContent = typeof currentTask.content === 'string' ? 
+        currentTask.content : JSON.stringify(currentTask.content);
+      
+      // Find next pending task
+      const nextTask = todos.find(t => t.status === 'pending');
+      
+      // Enhanced progress display with better ASCII icons
+      const progressBar = `[${completedCount}/${totalCount}]`;
+      taskStatus = `[▶] ${progressBar} ${currentTaskContent}`;
+      
+      if (nextTask) {
+        const nextTaskContent = typeof nextTask.content === 'string' ? 
+          nextTask.content : JSON.stringify(nextTask.content);
+        taskStatus += ` → [○] ${nextTaskContent}`;
+      }
     }
     
-    const currentTaskContent = typeof currentTask.content === 'string' ? 
-      currentTask.content : JSON.stringify(currentTask.content);
-    
-    // Find next pending task
-    const nextTask = todos.find(t => t.status === 'pending');
-    
-    // Enhanced progress display with better ASCII icons
-    const progressBar = `[${completedCount}/${totalCount}]`;
-    let display = `[▶] ${progressBar} ${currentTaskContent}`;
-    
-    if (nextTask) {
-      const nextTaskContent = typeof nextTask.content === 'string' ? 
-        nextTask.content : JSON.stringify(nextTask.content);
-      display += ` → [○] ${nextTaskContent}`;
-    }
-    
-    return display;
+    // Format as system message banner for clear agent identification
+    return `> [!NOTE] 🤖 Agent Task Progress\n> ${taskStatus}`;
   }
 
   /**
