@@ -68,5 +68,8 @@ export class CircuitBreaker<T = unknown, R = unknown> {
 }
 
 export const CLAUDE_SDK_CIRCUIT_OPTIONS: CircuitBreakerOptions = {
-  failureThreshold: 3, successThreshold: 2, timeout: 30000, monitoringPeriod: 60000
+  failureThreshold: 8,      // Allow more failures before opening (was 3)
+  successThreshold: 3,      // Require more successes to close (was 2) 
+  timeout: 10000,           // Reduce timeout to 10 seconds (was 30000)
+  monitoringPeriod: 120000  // Keep 2-minute monitoring period
 };

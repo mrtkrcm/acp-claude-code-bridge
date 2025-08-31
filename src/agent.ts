@@ -406,7 +406,7 @@ export class ClaudeACPAgent implements Agent {
         lastAccessed: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
-          version: '0.14.1'
+          version: '0.14.2'
         }
       });
     } catch (error) {
@@ -721,6 +721,18 @@ export class ClaudeACPAgent implements Agent {
       
       this.logger.debug(`Starting query with${this.maxTurns === 0 ? ' unlimited' : ` ${this.maxTurns}`} turns`);
       
+      // Send initial progress update to prevent silent period
+      await this.client.sessionUpdate({
+        sessionId: currentSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text: "🤔 Thinking...",
+          },
+        },
+      });
+      
       const messages = await this.claudeSDKCircuitBreaker.execute({
         prompt: queryInput,
         options: queryOptions,
@@ -845,20 +857,38 @@ export class ClaudeACPAgent implements Agent {
         return { stopReason: "cancelled" };
       }
 
-      // Send enhanced error information to client
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const contextInfo = contextStats ? ` (Context: ${(contextStats.usage * 100).toFixed(1)}%)` : '';
+      // Check if this is a circuit breaker error and provide better recovery
+      const isCircuitBreakerError = error instanceof Error && error.message.includes('Circuit breaker is OPEN');
+      const cbStats = this.claudeSDKCircuitBreaker.getStats();
       
-      await this.client.sessionUpdate({
-        sessionId: params.sessionId,
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "text",
-            text: `**Error**: ${errorMessage}${contextInfo}\n\n*If this persists, try starting a new session.*`,
+      if (isCircuitBreakerError) {
+        // Circuit breaker error - don't lose session state, inform user of temporary issue
+        await this.client.sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: `⏳ **Service Temporarily Unavailable**\n\n🔄 Circuit breaker active (${cbStats.failures} recent failures)\n*Temporarily suspending Claude API calls to prevent cascading failures. Retrying automatically in a few seconds...*\n\n**Your session state is preserved** - continue the conversation once service resumes.`,
+            },
           },
-        },
-      });
+        });
+      } else {
+        // Send enhanced error information to client for other errors
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const contextInfo = contextStats ? ` (Context: ${(contextStats.usage * 100).toFixed(1)}%)` : '';
+        
+        await this.client.sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: `❌ **Error**: ${errorMessage}${contextInfo}\n\n**Session state preserved** - you can continue the conversation. If this error persists, the issue may be temporary.`,
+            },
+          },
+        });
+      }
 
       return {
         stopReason: "end_turn",
