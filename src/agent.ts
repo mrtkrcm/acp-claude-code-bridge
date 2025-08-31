@@ -57,6 +57,11 @@ export class ClaudeACPAgent implements Agent {
   private extendedClientCapabilities: ExtendedClientCapabilities = {};
   private toolExecutionTiming: Map<string, ToolExecutionTiming> = new Map();
   private streamingUpdates: Map<string, { chunks: string[]; totalSize?: number }> = new Map();
+  
+  // Session synchronization to prevent race conditions
+  private sessionLocks: Map<string, Promise<unknown>> = new Map();
+  private readonly MAX_SESSIONS = 200; // Increased to match Claude Code capacity
+  private readonly SESSION_MEMORY_CLEANUP_INTERVAL = 30 * 60 * 1000; // 30 minutes - only cleanup orphaned
   private activeBatches: Map<string, ToolCallBatch> = new Map();
   private streamingCleanupTimer?: NodeJS.Timeout;
   private batchCleanupTimer?: NodeJS.Timeout;
@@ -99,17 +104,14 @@ export class ClaudeACPAgent implements Agent {
       permissionMode: this.defaultPermissionMode
     });
     
-    // Session cleanup and monitoring
+    // Enhanced session cleanup and monitoring with memory protection
     setInterval(() => {
-      const cleanedCount = this.contextMonitor.cleanupOldSessions();
-      if (cleanedCount > 0) {
-        this.logger.debug(`Cleaned up ${cleanedCount} old context sessions`);
-      }
-      
-      // Memory monitoring
+      this.performSessionCleanup();
+    }, this.SESSION_MEMORY_CLEANUP_INTERVAL);
+    
+    // Hourly comprehensive cleanup
+    setInterval(() => {
       this.monitorMemoryUsage();
-      
-      // Also cleanup orphaned agent sessions
       this.cleanupOrphanedSessions();
       
       // Cleanup old persisted sessions
@@ -117,6 +119,9 @@ export class ClaudeACPAgent implements Agent {
         this.logger.warn(`Session persistence cleanup failed: ${error}`);
       });
     }, 60 * 60 * 1000);
+    
+    // Initial cleanup on startup
+    this.performSessionCleanup();
 
     // Streaming and batch cleanup (more frequent)
     this.streamingCleanupTimer = setInterval(() => {
@@ -1431,7 +1436,7 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
-   * Generate enhanced task progress display with better formatting and progress bar.
+   * Generate optimized single-line task progress display with icons.
    */
   private generateTaskProgressDisplay(
     todos: Array<{
@@ -1454,21 +1459,14 @@ export class ClaudeACPAgent implements Agent {
     // Find next pending task
     const nextTask = todos.find(t => t.status === 'pending');
     
-    // Create visually distinct framed display
-    let display = `┌─ Task ${completedCount + 1}/${totalCount}\n`;
-    display += `│ ${currentTaskContent}\n`;
+    // Option 3: Pipe Separator Style (most readable) - no truncation
+    let display = `✓ Task ${completedCount + 1}/${totalCount}: ${currentTaskContent}`;
     
     if (nextTask) {
       const nextTaskContent = typeof nextTask.content === 'string' ? 
         nextTask.content : JSON.stringify(nextTask.content);
-      // Truncate next task if too long to keep display clean
-      const truncatedNext = nextTaskContent.length > 50 ? 
-        nextTaskContent.substring(0, 47) + '...' : nextTaskContent;
-      display += `├─ Next\n`;
-      display += `│ ${truncatedNext}\n`;
+      display += ` | ⏭ Next: ${nextTaskContent}`;
     }
-    
-    display += `└─`;
     
     return display;
   }
@@ -2934,6 +2932,93 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
+   * Synchronize session operations to prevent race conditions
+   */
+  private async withSessionLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    // Wait for any existing operation on this session
+    const existingLock = this.sessionLocks.get(sessionId);
+    if (existingLock) {
+      await existingLock.catch(() => {}); // Ignore errors from previous operations
+    }
+
+    // Create new operation promise
+    const operationPromise = operation();
+    this.sessionLocks.set(sessionId, operationPromise);
+
+    try {
+      return await operationPromise;
+    } finally {
+      // Only clear lock if it's still our operation
+      if (this.sessionLocks.get(sessionId) === operationPromise) {
+        this.sessionLocks.delete(sessionId);
+      }
+    }
+  }
+
+  /**
+   * Perform conservative session cleanup - only remove truly orphaned sessions
+   */
+  private performSessionCleanup(): void {
+    try {
+      // Only cleanup context monitor sessions older than Claude Code's typical timeout
+      const cleanedCount = this.contextMonitor.cleanupOldSessions(4 * 60 * 60 * 1000); // 4 hours
+      if (cleanedCount > 0) {
+        this.logger.debug(`Cleaned up ${cleanedCount} orphaned context sessions`);
+      }
+
+      // Only enforce session limit if we're way over capacity
+      if (this.sessions.size > this.MAX_SESSIONS * 1.5) {
+        this.enforceSessionLimits();
+      }
+
+      // Also cleanup existing agent orphaned sessions
+      this.cleanupOrphanedSessions();
+    } catch (error) {
+      this.logger.warn('Session cleanup failed:', error);
+    }
+  }
+
+  /**
+   * Enforce session limits by removing oldest inactive sessions only when necessary
+   */
+  private enforceSessionLimits(): void {
+    try {
+      const sessionEntries = Array.from(this.sessions.entries());
+      const excessCount = sessionEntries.length - this.MAX_SESSIONS;
+      
+      if (excessCount <= 0) return;
+
+      // Find sessions without active operations
+      const inactiveSessions = sessionEntries
+        .filter(([sessionId]) => !this.sessionLocks.has(sessionId))
+        .filter(([_, session]) => !session.pendingPrompt);
+
+      // Only remove sessions that are clearly inactive
+      const sessionsToRemove = inactiveSessions
+        .slice(0, Math.min(excessCount, inactiveSessions.length));
+
+      for (const [sessionId, session] of sessionsToRemove) {
+        // Cleanup abort controllers to prevent memory leaks
+        if (session.abortController) {
+          session.abortController.abort();
+        }
+        
+        this.sessions.delete(sessionId);
+        this.contextMonitor.clearSession(sessionId);
+        
+        this.logger.debug(`Removed inactive session: ${sessionId}`);
+      }
+
+      if (sessionsToRemove.length > 0) {
+        this.logger.info(`Enforced session limits: removed ${sessionsToRemove.length} inactive sessions`);
+      }
+    } catch (error) {
+      this.logger.warn('Failed to enforce session limits:', error);
+    }
+  }
+
+
+  /**
    * Cleanup method called on shutdown
    */
   destroy(): void {
@@ -2948,6 +3033,7 @@ export class ClaudeACPAgent implements Agent {
     this.streamingUpdates.clear();
     this.activeBatches.clear();
     this.toolExecutionTiming.clear();
+    this.sessionLocks.clear();
     
     this.logger.info('ACP Agent destroyed and cleaned up');
   }
