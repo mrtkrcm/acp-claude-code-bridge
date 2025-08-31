@@ -475,7 +475,7 @@ export class ClaudeACPAgent implements Agent {
         .join("");
 
       this.logger.debug(
-        `Prompt received (${promptText.length} chars): ${promptText.substring(0, 100)}...`,
+        `Prompt received (${promptText.length} chars): ${promptText}`,
       );
       
       // Track context usage for user message
@@ -641,7 +641,7 @@ export class ClaudeACPAgent implements Agent {
             };
             if (assistantMsg.content) {
               this.logger.debug(
-                `Assistant content: ${JSON.stringify(assistantMsg.content).substring(0, 200)}`,
+                `Assistant content: ${JSON.stringify(assistantMsg.content)}`,
               );
             }
           }
@@ -1386,8 +1386,8 @@ export class ClaudeACPAgent implements Agent {
       
       // Command operations
       if (inputObj.command) {
-        const command = String(inputObj.command).substring(0, 30);
-        return `Execute: ${command}${command.length > 30 ? '...' : ''}`;
+        const command = String(inputObj.command);
+        return `Execute: ${command}`;
       }
     }
     
@@ -1446,7 +1446,6 @@ export class ClaudeACPAgent implements Agent {
     totalCount: number
   ): string {
     const progressPercent = Math.round((completedCount / totalCount) * 100);
-    const inProgressCount = todos.filter(t => t.status === 'in_progress').length;
     
     // Find current task
     const currentTask = todos.find(t => t.status === 'in_progress');
@@ -1454,8 +1453,19 @@ export class ClaudeACPAgent implements Agent {
       (typeof currentTask.content === 'string' ? currentTask.content : JSON.stringify(currentTask.content)) : 
       'No active task';
     
-    // Simple single-line format that works well in Zed
-    return `Tasks: ${completedCount}/${totalCount} complete (${progressPercent}%) | Currently: ${currentTaskContent}`;
+    // Build complete task list for visibility
+    let display = `Tasks: ${completedCount}/${totalCount} complete (${progressPercent}%) | Current: ${currentTaskContent}\n\n`;
+    
+    todos.forEach((todo, index) => {
+      const statusIcon = 
+        todo.status === "completed" ? "[x]" :
+        todo.status === "in_progress" ? "[~]" : "[ ]";
+      
+      const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
+      display += `${(index + 1).toString().padStart(2, '0')}. ${statusIcon} ${content}\n`;
+    });
+    
+    return display;
   }
 
   /**
@@ -1841,8 +1851,8 @@ export class ClaudeACPAgent implements Agent {
       
       // Bash commands - show command preview
       if (lowerName.includes('bash') && inputObj.command) {
-        const cmd = String(inputObj.command).substring(0, 30);
-        return `${toolName}: ${cmd}${cmd.length > 30 ? '...' : ''}`;
+        const cmd = String(inputObj.command);
+        return `${toolName}: ${cmd}`;
       }
       
       // Todo operations - show count
