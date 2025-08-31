@@ -1,6 +1,6 @@
 {
   "name": "@mrtkrcm/acp-claude-code",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "description": "ACP (Agent Client Protocol) bridge for Claude Code",
   "main": "dist/cli.js",
   "type": "module",

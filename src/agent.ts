@@ -381,7 +381,7 @@ export class ClaudeACPAgent implements Agent {
         lastAccessed: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
-          version: '0.13.1'
+          version: '0.13.2'
         }
       });
     } catch (error) {
