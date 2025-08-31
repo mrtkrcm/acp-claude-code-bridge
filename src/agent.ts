@@ -33,13 +33,9 @@ import type {
   DiffChange,
   ResourceMetadata,
   ToolCallBatch,
-  SessionInfo,
-  ListSessionsRequest,
-  ListSessionsResponse
 } from "./types.js";
 import { 
   MIME_TYPE_MAPPINGS,
-  validateListSessionsRequest,
   validateNewSessionRequest,
   validateLoadSessionRequest,
   validatePromptRequest
@@ -502,82 +498,6 @@ export class ClaudeACPAgent implements Agent {
     this.logger.debug("Using Claude Code authentication from ~/.claude/config.json");
   }
 
-  // Custom ACP extension: List available sessions
-  async listSessions(params: ListSessionsRequest = {}): Promise<ListSessionsResponse> {
-    let sessionCount = 0;
-    const response = await withPerformanceTracking('listSessions', async () => {
-      return await wrapAsyncOperation(async () => {
-        // Validate input parameters
-        const validatedParams = validateListSessionsRequest(params);
-        this.logger.debug("listSessions called", validatedParams);
-        
-        // Get persisted sessions
-        const persistedSessions = await this.sessionPersistence.getAllSessions();
-        
-        // Convert to SessionInfo format
-        const allSessions: SessionInfo[] = [];
-        
-        // Add persisted sessions
-        for (const persistedSession of persistedSessions) {
-          const isActive = this.sessions.has(persistedSession.sessionId);
-          
-          allSessions.push({
-            sessionId: persistedSession.sessionId,
-            createdAt: persistedSession.createdAt,
-            lastAccessed: persistedSession.lastAccessed,
-            permissionMode: (persistedSession.permissionMode as "default" | "acceptEdits" | "bypassPermissions" | "plan") || "default",
-            metadata: (persistedSession.metadata as { userAgent?: string; version?: string; platform?: string; clientVersion?: string; }) || {},
-            claudeSessionId: persistedSession.claudeSessionId,
-            status: isActive ? "active" : "persisted"
-          });
-        }
-        
-        // Add any in-memory sessions not yet persisted
-        for (const [sessionId, session] of this.sessions.entries()) {
-          const alreadyIncluded = allSessions.some(s => s.sessionId === sessionId);
-          if (!alreadyIncluded) {
-            allSessions.push({
-              sessionId,
-              createdAt: session.createdAt?.toISOString() || new Date().toISOString(),
-              lastAccessed: session.lastActivity?.toISOString() || new Date().toISOString(),
-              permissionMode: session.permissionMode || "default",
-              metadata: session.sessionMetadata || {},
-              claudeSessionId: session.claudeSessionId,
-              status: "active"
-            });
-          }
-        }
-
-        // Filter by status if specified
-        let filteredSessions = allSessions;
-        if (validatedParams.status && validatedParams.status !== "all") {
-          filteredSessions = allSessions.filter(session => session.status === validatedParams.status);
-        }
-
-        // Sort by lastAccessed descending (most recent first)
-        filteredSessions.sort((a, b) => 
-          new Date(b.lastAccessed).getTime() - new Date(a.lastAccessed).getTime()
-        );
-
-        // Apply pagination
-        const offset = validatedParams.offset || 0;
-        const limit = validatedParams.limit || 50;
-        const paginatedSessions = filteredSessions.slice(offset, offset + limit);
-        
-        const response: ListSessionsResponse = {
-          sessions: paginatedSessions,
-          total: filteredSessions.length,
-          hasMore: offset + limit < filteredSessions.length
-        };
-
-        sessionCount = response.total;
-        this.logger.debug(`Returning ${paginatedSessions.length} of ${filteredSessions.length} sessions`);
-        return response;
-      }, { operation: 'listSessions' });
-    }, undefined, { sessionCount });
-    
-    return response;
-  }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     // Validate input parameters

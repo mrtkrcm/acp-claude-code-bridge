@@ -217,65 +217,13 @@ export interface ToolPermissionConfig {
   defaultPermission?: PermissionLevel; // Default for unlisted tools
 }
 
-// Session listing types (custom ACP extension)
-export interface SessionInfo {
-  sessionId: string;
-  createdAt: string;
-  lastAccessed: string;
-  permissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
-  metadata: {
-    userAgent?: string;
-    version?: string;
-    platform?: string;
-    clientVersion?: string;
-  };
-  claudeSessionId?: string;
-  status: "active" | "inactive" | "persisted";
-}
 
-export interface ListSessionsRequest {
-  limit?: number;
-  offset?: number;
-  status?: "active" | "inactive" | "persisted" | "all";
-}
-
-export interface ListSessionsResponse {
-  sessions: SessionInfo[];
-  total: number;
-  hasMore: boolean;
-}
 
 // Zod validation schemas for runtime type checking
 export const PermissionModeSchema = z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan']);
 
-export const SessionStatusSchema = z.enum(['active', 'inactive', 'persisted']);
 
-export const SessionInfoSchema = z.object({
-  sessionId: z.string().uuid(),
-  createdAt: z.string().datetime(),
-  lastAccessed: z.string().datetime(),
-  permissionMode: PermissionModeSchema,
-  metadata: z.object({
-    userAgent: z.string().optional(),
-    version: z.string().optional(),
-    platform: z.string().optional(),
-    clientVersion: z.string().optional(),
-  }),
-  claudeSessionId: z.string().uuid().optional(),
-  status: SessionStatusSchema,
-});
 
-export const ListSessionsRequestSchema = z.object({
-  limit: z.number().int().min(1).max(200).optional(),
-  offset: z.number().int().min(0).optional(),
-  status: z.union([SessionStatusSchema, z.literal('all')]).optional(),
-});
-
-export const ListSessionsResponseSchema = z.object({
-  sessions: z.array(SessionInfoSchema),
-  total: z.number().int().min(0),
-  hasMore: z.boolean(),
-});
 
 // Common validation schemas
 export const SessionIdSchema = z.string().uuid();
@@ -317,9 +265,6 @@ export const PromptRequestSchema = z.object({
 });
 
 // Validation helper functions - these perform basic validation and return the original types
-export function validateListSessionsRequest(data: unknown): ListSessionsRequest {
-  return ListSessionsRequestSchema.parse(data);
-}
 
 export function validateSessionId(sessionId: unknown): string {
   if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
