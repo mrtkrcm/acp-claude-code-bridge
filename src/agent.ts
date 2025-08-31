@@ -3321,6 +3321,18 @@ export class ClaudeACPAgent implements Agent {
 
     try {
       return await operationPromise;
+    } catch (error) {
+      // On timeout or error, ensure session state is properly cleaned up
+      if (String(error).includes('timeout')) {
+        const session = this.sessions.get(sessionId);
+        if (session) {
+          // Clear pending prompt state to prevent "busy" condition
+          session.pendingPrompt = null;
+          session.abortController = null;
+          this.logger.warn(`Session ${sessionId} recovered from timeout - cleared busy state`);
+        }
+      }
+      throw error;
     } finally {
       // Always clear the lock to prevent memory leaks
       this.sessionLocks.delete(sessionId);

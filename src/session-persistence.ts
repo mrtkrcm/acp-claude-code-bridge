@@ -67,12 +67,18 @@ export class SessionPersistenceManager {
       for (const file of sessionFiles) {
         try {
           const filePath = resolve(this.baseDir, file);
-          const stats = await stat(filePath);
-          if (now - stats.mtime.getTime() > ageThreshold) { 
+          
+          // Read session content to get lastAccessed timestamp
+          const content = await readFile(filePath, 'utf-8');
+          const session = JSON.parse(content) as PersistedSessionData;
+          
+          // Use lastAccessed timestamp from session data, not file mtime
+          const lastAccessed = new Date(session.lastAccessed).getTime();
+          if (now - lastAccessed > ageThreshold) { 
             await unlink(filePath); 
             removed++; 
           }
-        } catch { /* ignore file errors */ }
+        } catch { /* ignore file errors and parsing errors */ }
       }
     } catch { /* ignore directory errors */ }
     
@@ -132,6 +138,12 @@ export class SessionPersistenceManager {
   private registerCleanupHandlers(): void {
     if (this.cleanupRegistered) return;
     this.cleanupRegistered = true;
+    
+    // Increase max listeners to prevent warnings in test environments
+    const currentMaxListeners = process.getMaxListeners();
+    if (currentMaxListeners < 20) {
+      process.setMaxListeners(20);
+    }
     
     const cleanup = () => { this.cleanupTempFiles().catch(() => {}); };
     process.once('exit', cleanup); process.once('SIGINT', cleanup); process.once('SIGTERM', cleanup);

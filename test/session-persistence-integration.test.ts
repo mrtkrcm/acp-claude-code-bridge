@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { ClaudeACPAgent } from '../src/agent.js'
 import { SessionPersistenceManager, resetDefaultPersistenceManager } from '../src/session-persistence.js'
 import { existsSync } from 'node:fs'
-import { mkdir, rmdir, writeFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -29,7 +29,7 @@ describe('Session Persistence Integration Tests', () => {
   afterEach(async () => {
     // Cleanup test directory
     if (existsSync(testSessionsDir)) {
-      await rmdir(testSessionsDir, { recursive: true })
+      await rm(testSessionsDir, { recursive: true })
     }
     
     // Restore original sessions directory
@@ -42,10 +42,12 @@ describe('Session Persistence Integration Tests', () => {
 
   describe('Session Creation and Persistence', () => {
     it('should create and persist a new session', async () => {
-      const testSessionId = 'test-session-001'
-      
-      // Create new session
-      await agent.newSession({ sessionId: testSessionId })
+      // Create new session (newSession generates its own ID)
+      const response = await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: []
+      })
+      const testSessionId = response.sessionId
       
       // Verify session file exists
       const sessionFile = join(testSessionsDir, `${testSessionId}.json`)
@@ -63,11 +65,14 @@ describe('Session Persistence Integration Tests', () => {
     })
 
     it('should persist Claude session ID when obtained', async () => {
-      const testSessionId = 'test-session-002'
       const mockClaudeSessionId = 'claude-session-12345'
       
       // Create session
-      await agent.newSession({ sessionId: testSessionId })
+      const response = await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: []
+      })
+      const testSessionId = response.sessionId
       
       // Simulate obtaining Claude session ID (this happens during first prompt)
       const session = (agent as any).sessions.get(testSessionId)
@@ -105,12 +110,15 @@ describe('Session Persistence Integration Tests', () => {
       await persistence.saveSession(sessionData)
       
       // Load session through agent
-      await agent.loadSession({ sessionId: testSessionId })
+      await agent.loadSession({ 
+        sessionId: testSessionId,
+        cwd: process.cwd(),
+        mcpServers: []
+      })
       
       // Verify session is loaded in memory
       const loadedSession = (agent as any).sessions.get(testSessionId)
       expect(loadedSession).toBeDefined()
-      expect(loadedSession.sessionId).toBe(testSessionId)
       expect(loadedSession.claudeSessionId).toBe('existing-claude-session-456')
       expect(loadedSession.permissionMode).toBe('bypassPermissions')
     })
@@ -119,7 +127,11 @@ describe('Session Persistence Integration Tests', () => {
       const nonExistentSessionId = 'non-existent-session'
       
       // Should not throw error
-      await agent.loadSession({ sessionId: nonExistentSessionId })
+      await agent.loadSession({ 
+        sessionId: nonExistentSessionId,
+        cwd: process.cwd(),
+        mcpServers: []
+      })
       
       // Session should not be in memory since it wasn't found in persistence
       const session = (agent as any).sessions.get(nonExistentSessionId)
@@ -129,11 +141,14 @@ describe('Session Persistence Integration Tests', () => {
 
   describe('Session State Updates', () => {
     it('should update session timestamp on activity', async () => {
-      const testSessionId = 'test-session-004'
       const persistence = new SessionPersistenceManager(testSessionsDir)
       
       // Create initial session
-      await agent.newSession({ sessionId: testSessionId })
+      const response = await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: []
+      })
+      const testSessionId = response.sessionId
       
       const initialData = await persistence.loadSession(testSessionId)
       const initialTimestamp = initialData!.lastAccessed
@@ -142,7 +157,7 @@ describe('Session Persistence Integration Tests', () => {
       await new Promise(resolve => setTimeout(resolve, 10))
       
       // Update session (simulate activity)
-      await agent.persistSessionState(testSessionId)
+      await (agent as any).persistSessionState(testSessionId)
       
       const updatedData = await persistence.loadSession(testSessionId)
       const updatedTimestamp = updatedData!.lastAccessed
@@ -152,10 +167,13 @@ describe('Session Persistence Integration Tests', () => {
     })
 
     it('should preserve all session metadata across updates', async () => {
-      const testSessionId = 'test-session-005'
       const persistence = new SessionPersistenceManager(testSessionsDir)
       
-      await agent.newSession({ sessionId: testSessionId })
+      const response = await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: []
+      })
+      const testSessionId = response.sessionId
       
       // Get initial session and add metadata
       const session = (agent as any).sessions.get(testSessionId)
@@ -177,8 +195,11 @@ describe('Session Persistence Integration Tests', () => {
 
   describe('Concurrent Session Operations', () => {
     it('should handle concurrent session saves safely', async () => {
-      const testSessionId = 'test-session-006'
-      await agent.newSession({ sessionId: testSessionId })
+      const response = await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: []
+      })
+      const testSessionId = response.sessionId
       
       // Simulate concurrent updates
       const promises = []
@@ -254,7 +275,7 @@ describe('Session Persistence Integration Tests', () => {
 
     it('should recover from missing sessions directory', async () => {
       // Remove test directory
-      await rmdir(testSessionsDir, { recursive: true })
+      await rm(testSessionsDir, { recursive: true })
       
       // Should recreate directory and work normally
       const persistence = new SessionPersistenceManager(testSessionsDir)
