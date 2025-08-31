@@ -488,7 +488,7 @@ export class ClaudeACPAgent implements Agent {
           this.logger.warn(`Failed to persist context stats: ${error}`, { sessionId: currentSessionId });
         });
         
-        // Send context status as a subtle message to user with enhanced formatting
+        // Send concise context status
         if (contextWarning.level === 'critical') {
           await this.client.sessionUpdate({
             sessionId: currentSessionId,
@@ -496,19 +496,18 @@ export class ClaudeACPAgent implements Agent {
               sessionUpdate: "agent_message_chunk",
               content: {
                 type: "text",
-                text: `🚨 **Context Alert**: ${contextWarning.message}\n💡 ${contextWarning.recommendation || 'Consider starting a new session.'}\n\n`,
+                text: `Context near limit (${Math.round(contextWarning.usage * 100)}%) - consider new session`,
               },
             },
           });
         } else if (contextWarning.level === 'warning') {
-          // Show warning level notifications too, but less prominently
           await this.client.sessionUpdate({
             sessionId: currentSessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
               content: {
                 type: "text",
-                text: `⚠️ ${contextWarning.message}\n`,
+                text: `Context usage: ${Math.round(contextWarning.usage * 100)}%`,
               },
             },
           });
@@ -1075,14 +1074,9 @@ export class ClaudeACPAgent implements Agent {
             });
 
             // Handle promise properly to avoid unhandled rejections
-            if (updatePromise?.catch) {
-              updatePromise.catch(error => {
-                this.logger.warn(`Error sending todo update: ${error}`);
-              });
-            }
-            
-            // Add small delay to prevent message flooding in Zed UI
-            await new Promise(resolve => setTimeout(resolve, 100));
+            updatePromise?.catch(error => {
+              this.logger.warn(`Todo update error: ${error}`);
+            });
           }
         }
         break;
@@ -1447,25 +1441,17 @@ export class ClaudeACPAgent implements Agent {
   ): string {
     const progressPercent = Math.round((completedCount / totalCount) * 100);
     
-    // Find current task
+    // Find current task for concise display
     const currentTask = todos.find(t => t.status === 'in_progress');
-    const currentTaskContent = currentTask ? 
-      (typeof currentTask.content === 'string' ? currentTask.content : JSON.stringify(currentTask.content)) : 
-      'No active task';
+    if (!currentTask) {
+      return `✓ All ${totalCount} tasks completed`;
+    }
     
-    // Build complete task list for visibility
-    let display = `Tasks: ${completedCount}/${totalCount} complete (${progressPercent}%) | Current: ${currentTaskContent}\n\n`;
+    const currentTaskContent = typeof currentTask.content === 'string' ? 
+      currentTask.content : JSON.stringify(currentTask.content);
     
-    todos.forEach((todo, index) => {
-      const statusIcon = 
-        todo.status === "completed" ? "[x]" :
-        todo.status === "in_progress" ? "[~]" : "[ ]";
-      
-      const content = typeof todo.content === 'string' ? todo.content : JSON.stringify(todo.content);
-      display += `${(index + 1).toString().padStart(2, '0')}. ${statusIcon} ${content}\n`;
-    });
-    
-    return display;
+    // Elegant single-line progress with current task
+    return `Task ${completedCount + 1}/${totalCount}: ${currentTaskContent}`;
   }
 
   /**
