@@ -300,25 +300,50 @@ export class PerformanceMonitor {
   }
 
   private startPeriodicReporting(): void {
-    // Report system metrics every 5 minutes
+    // Report system metrics every 5 minutes AND cleanup old metrics
     setInterval(() => {
+      // Cleanup old metrics first to prevent memory bloat
+      this.cleanupOldMetrics();
+      
       const metrics = this.getSystemMetrics();
       const health = this.getHealthCheck();
       
-      this.logger.info('System metrics report', {
-        uptime: `${(metrics.uptime / 1000 / 60).toFixed(2)} minutes`,
-        memoryUsage: `${(metrics.memoryUsage.heapUsed / 1024 / 1024).toFixed(2)}MB`,
-        activeOperations: metrics.activeOperations,
-        totalOperations: metrics.totalOperations,
-        averageResponseTime: `${metrics.averageResponseTime.toFixed(2)}ms`,
-        errorRate: `${metrics.errorRate.toFixed(2)}%`,
-        healthStatus: health.status
-      });
+      // Only log if debug mode or issues detected
+      if (process.env.ACP_DEBUG === 'true' || health.status !== 'healthy') {
+        this.logger.info('System metrics report', {
+          uptime: `${(metrics.uptime / 1000 / 60).toFixed(2)} minutes`,
+          memoryUsage: `${(metrics.memoryUsage.heapUsed / 1024 / 1024).toFixed(2)}MB`,
+          activeOperations: metrics.activeOperations,
+          totalOperations: metrics.totalOperations,
+          averageResponseTime: `${metrics.averageResponseTime.toFixed(2)}ms`,
+          errorRate: `${metrics.errorRate.toFixed(2)}%`,
+          healthStatus: health.status,
+          metricsCount: this.metrics.length
+        });
+      }
       
       if (health.status !== 'healthy') {
         this.logger.warn('Health check issues detected', { checks: health.checks });
       }
     }, 5 * 60 * 1000); // 5 minutes
+  }
+
+  private cleanupOldMetrics(): void {
+    // Keep only last 500 metrics instead of 1000 for better memory efficiency
+    const targetSize = 500;
+    if (this.metrics.length > targetSize) {
+      const removeCount = this.metrics.length - targetSize;
+      this.metrics.splice(0, removeCount);
+    }
+    
+    // Also cleanup very old active operations (stuck operations)
+    const staleThreshold = Date.now() - (10 * 60 * 1000); // 10 minutes
+    for (const [operationId, operation] of this.activeOperations.entries()) {
+      if (operation.start < staleThreshold) {
+        this.logger.warn(`Removing stale operation: ${operation.operation}`, { operationId });
+        this.activeOperations.delete(operationId);
+      }
+    }
   }
 }
 

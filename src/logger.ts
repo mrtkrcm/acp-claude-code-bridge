@@ -16,6 +16,10 @@ export class Logger {
   private readonly component: string;
   private readonly debugMode: boolean;
   private fileLogger: NodeJS.WritableStream | null = null;
+  private logBuffer: LogEntry[] = [];
+  private flushTimer?: NodeJS.Timeout;
+  private readonly BUFFER_SIZE = 50;
+  private readonly FLUSH_INTERVAL = 5000; // 5 seconds
 
   constructor(component: string, debugMode = false) {
     this.component = component;
@@ -74,9 +78,17 @@ export class Logger {
       consoleMethod(formattedMessage + argsStr);
     }
 
-    // File logging
+    // File logging with buffering
     if (this.fileLogger) {
-      this.fileLogger.write(JSON.stringify(entry) + '\n');
+      this.logBuffer.push(entry);
+      
+      // Immediate flush for errors or if buffer is full
+      if (level === 'ERROR' || this.logBuffer.length >= this.BUFFER_SIZE) {
+        this.flushLogBuffer();
+      } else if (!this.flushTimer) {
+        // Schedule flush
+        this.flushTimer = setTimeout(() => this.flushLogBuffer(), this.FLUSH_INTERVAL);
+      }
     }
   }
 
@@ -117,7 +129,24 @@ export class Logger {
     }
   }
 
+  private flushLogBuffer(): void {
+    if (this.logBuffer.length === 0) return;
+    
+    if (this.fileLogger) {
+      const entries = this.logBuffer.splice(0); // Clear buffer
+      const logText = entries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+      this.fileLogger.write(logText);
+    }
+    
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+  }
+
   destroy(): void {
+    // Flush any remaining logs
+    this.flushLogBuffer();
     this.writeShutdownMessage();
   }
 }

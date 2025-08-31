@@ -16,6 +16,9 @@ export class SessionPersistenceManager {
   private readonly maxAge: number;
   
   private cleanupRegistered = false;
+  private writeQueue = new Map<string, PersistedSessionData>();
+  private writeTimer?: NodeJS.Timeout;
+  private readonly BATCH_WRITE_DELAY = 1000; // 1 second batching
 
   constructor(config: SessionPersistenceConfig = {}) {
     this.baseDir = config.baseDir || process.env.ACP_SESSIONS_DIR || resolve(homedir(), '.acp-claude-code', 'sessions');
@@ -32,17 +35,45 @@ export class SessionPersistenceManager {
   }
   
   async saveSession(sessionData: PersistedSessionData): Promise<void> {
-    await this.ensureDirectoryExists();
-    const sessionPath = resolve(this.baseDir, `${sessionData.sessionId}.json`);
-    const tempPath = `${sessionPath}.tmp.${Date.now()}.${process.pid}`;
+    // Queue write for batching instead of immediate write
+    this.writeQueue.set(sessionData.sessionId, sessionData);
     
-    try {
-      await writeFile(tempPath, JSON.stringify(sessionData, null, 2));
-      await rename(tempPath, sessionPath);
-    } catch (error) {
-      try { await unlink(tempPath); } catch { /* ignore cleanup errors */ }
-      throw error;
+    if (!this.writeTimer) {
+      this.writeTimer = setTimeout(() => {
+        this.flushWriteQueue().catch(console.error);
+      }, this.BATCH_WRITE_DELAY);
     }
+  }
+
+  private async flushWriteQueue(): Promise<void> {
+    if (this.writeQueue.size === 0) return;
+    
+    await this.ensureDirectoryExists();
+    const writePromises: Promise<void>[] = [];
+    
+    // Process all queued writes in parallel
+    for (const [sessionId, sessionData] of this.writeQueue.entries()) {
+      const sessionPath = resolve(this.baseDir, `${sessionId}.json`);
+      const tempPath = `${sessionPath}.tmp.${Date.now()}.${process.pid}`;
+      
+      const writePromise = (async () => {
+        try {
+          await writeFile(tempPath, JSON.stringify(sessionData, null, 2));
+          await rename(tempPath, sessionPath);
+        } catch (error) {
+          try { await unlink(tempPath); } catch { /* ignore cleanup errors */ }
+          throw error;
+        }
+      })();
+      
+      writePromises.push(writePromise);
+    }
+    
+    this.writeQueue.clear();
+    this.writeTimer = undefined;
+    
+    // Wait for all writes to complete
+    await Promise.allSettled(writePromises);
   }
   
   async loadSession(sessionId: string): Promise<PersistedSessionData | null> {
