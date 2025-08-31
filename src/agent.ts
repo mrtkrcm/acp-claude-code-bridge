@@ -330,7 +330,7 @@ export class ClaudeACPAgent implements Agent {
         createdAt: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
-          version: '0.8.1'
+          version: '0.9.0'
         }
       });
     } catch (error) {
@@ -343,7 +343,7 @@ export class ClaudeACPAgent implements Agent {
               sessionId,
               permissionMode: this.defaultPermissionMode,
               createdAt: new Date().toISOString(),
-              metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.8.1' }
+              metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.9.0' }
             });
           } catch (retryError) {
             this.logger.warn(`Session save retry failed: ${retryError}`, { sessionId });
