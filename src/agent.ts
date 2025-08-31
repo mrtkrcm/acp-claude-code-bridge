@@ -1,5 +1,7 @@
 import { query } from "@anthropic-ai/claude-code";
 import type { SDKMessage } from "@anthropic-ai/claude-code";
+import { randomUUID } from 'crypto';
+import * as os from 'os';
 import {
   Agent,
   Client,
@@ -210,16 +212,18 @@ export class ClaudeACPAgent implements Agent {
     const heapMB = Math.round(usage.heapUsed / 1024 / 1024);
     const rss = Math.round(usage.rss / 1024 / 1024);
     
-    // Log memory stats every hour
+    // Dynamic thresholds based on system memory (fallback to defaults)
+    const totalMemMB = Math.round(os.totalmem() / 1024 / 1024);
+    const warnThreshold = Math.min(totalMemMB * 0.05, 500) * 1024 * 1024; // 5% of system or 500MB max
+    const criticalThreshold = Math.min(totalMemMB * 0.1, 1024) * 1024 * 1024; // 10% of system or 1GB max
+    
     this.logger.debug(`Memory usage: ${heapMB}MB heap, ${rss}MB RSS`);
     
-    // Warn on high usage
-    if (usage.heapUsed > 500 * 1024 * 1024) { // 500MB
+    if (usage.heapUsed > warnThreshold) {
       this.logger.warn(`High memory usage detected: ${heapMB}MB heap`);
     }
     
-    // Critical memory warning
-    if (usage.heapUsed > 1024 * 1024 * 1024) { // 1GB
+    if (usage.heapUsed > criticalThreshold) {
       this.logger.error(`Critical memory usage: ${heapMB}MB heap - consider restart`);
     }
   }
@@ -351,10 +355,8 @@ export class ClaudeACPAgent implements Agent {
       throw new Error('System resources exhausted - cannot create new session');
     }
 
-    // Create a session ID with timestamp for better uniqueness
-    const timestamp = Date.now().toString(36);
-    const random = Math.random().toString(36).substring(2);
-    const sessionId = `${timestamp}-${random}`;
+    // Create a session ID - use UUID format for Zed compatibility
+    const sessionId = this.generateSessionId();
     
     if (!globalResourceManager.addSession(sessionId)) {
       throw new Error('Maximum concurrent sessions reached');
@@ -379,7 +381,7 @@ export class ClaudeACPAgent implements Agent {
         lastAccessed: new Date().toISOString(),
         metadata: {
           userAgent: 'ACP-Claude-Code-Bridge',
-          version: '0.10.0'
+          version: '0.13.1'
         }
       });
     } catch (error) {
@@ -457,19 +459,12 @@ export class ClaudeACPAgent implements Agent {
       });
     }
 
-    // Create a new session entry if not found in persistence
-    // This handles the case where the agent restarts but Zed still has the session ID
-    this.sessions.set(params.sessionId, {
-      pendingPrompt: null,
-      abortController: null,
-      claudeSessionId: undefined,
-      permissionMode: this.defaultPermissionMode,
-    });
-
+    // Don't create a session in memory if it doesn't exist in persistence
+    // This prevents phantom sessions from being created
     this.logger.debug(
-      `Created new session entry for loaded session: ${params.sessionId}`,
-      'INFO',
-      { sessionId: params.sessionId, permissionMode: this.defaultPermissionMode }
+      `Session not found in persistence: ${params.sessionId}`,
+      'DEBUG',
+      { sessionId: params.sessionId }
     );
   }
 
@@ -1575,8 +1570,6 @@ export class ClaudeACPAgent implements Agent {
   private enhanceWebContent(outputText: string, toolName: string): string {
     try {
       // Try to extract structured information from web content
-      const lines = outputText.split('\n');
-      const firstLine = lines[0] || '';
       
       if (toolName === 'WebSearch') {
         // Look for search result patterns
@@ -1651,7 +1644,7 @@ export class ClaudeACPAgent implements Agent {
    * Extract domains from web content.
    */
   private extractDomains(text: string): string[] {
-    const domainPattern = /https?:\/\/([^\/\s]+)/g;
+    const domainPattern = /https?:\/\/([^/\s]+)/g;
     const domains = new Set<string>();
     let match;
     
@@ -1762,7 +1755,7 @@ export class ClaudeACPAgent implements Agent {
     }
     
     // Format as system message banner for clear agent identification
-    return `> [!NOTE] ◈ Agent Task Progress\n> ${taskStatus}`;
+    return `> ◈ Agent Task Progress\n> ${taskStatus}`;
   }
 
   /**
@@ -3362,5 +3355,28 @@ export class ClaudeACPAgent implements Agent {
     this.sessionLocks.clear();
     
     this.logger.info('ACP Agent destroyed and cleaned up');
+  }
+
+  /**
+   * Generate session ID with UUID format for Zed compatibility
+   */
+  private generateSessionId(): string {
+    return randomUUID();
+  }
+
+  /**
+   * Check if session ID is valid UUID format
+   */
+  private isUUIDFormat(sessionId: string): boolean {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(sessionId);
+  }
+
+  /**
+   * Check if session ID is legacy format
+   */
+  private isLegacyFormat(sessionId: string): boolean {
+    const legacyRegex = /^[a-z0-9]{8}-[a-z0-9]{11}$/;
+    return legacyRegex.test(sessionId);
   }
 }

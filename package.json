@@ -1,6 +1,6 @@
 {
   "name": "@mrtkrcm/acp-claude-code",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "ACP (Agent Client Protocol) bridge for Claude Code",
   "main": "dist/cli.js",
   "type": "module",
@@ -59,7 +59,7 @@
     "@zed-industries/agent-client-protocol": "0.1.2"
   },
   "devDependencies": {
-    "@eslint/js": "9.17.0",
+    "@eslint/js": "9.34.0",
     "@semantic-release/changelog": "6.0.3",
     "@semantic-release/git": "10.0.1",
     "@semantic-release/github": "11.0.5",
@@ -70,9 +70,9 @@
     "@vitest/ui": "^3.2.4",
     "conventional-changelog-conventionalcommits": "8.0.0",
     "eslint": "^9.17.0",
-    "globals": "15.14.0",
+    "globals": "16.3.0",
     "prettier": "^3.6.2",
-    "semantic-release": "24.2.0",
+    "semantic-release": "24.2.7",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "typescript-eslint": "8.41.0",
