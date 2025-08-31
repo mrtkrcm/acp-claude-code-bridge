@@ -1,5 +1,7 @@
 import { query } from "@anthropic-ai/claude-code";
 import type { SDKMessage } from "@anthropic-ai/claude-code";
+import { randomUUID } from 'crypto';
+import * as os from 'os';
 import {
   Agent,
   Client,
@@ -211,7 +213,7 @@ export class ClaudeACPAgent implements Agent {
     const rss = Math.round(usage.rss / 1024 / 1024);
     
     // Dynamic thresholds based on system memory (fallback to defaults)
-    const totalMemMB = Math.round(require('os').totalmem() / 1024 / 1024);
+    const totalMemMB = Math.round(os.totalmem() / 1024 / 1024);
     const warnThreshold = Math.min(totalMemMB * 0.05, 500) * 1024 * 1024; // 5% of system or 500MB max
     const criticalThreshold = Math.min(totalMemMB * 0.1, 1024) * 1024 * 1024; // 10% of system or 1GB max
     
@@ -353,10 +355,8 @@ export class ClaudeACPAgent implements Agent {
       throw new Error('System resources exhausted - cannot create new session');
     }
 
-    // Create a session ID with timestamp for better uniqueness
-    const timestamp = Date.now().toString(36);
-    const random = Math.random().toString(36).substring(2);
-    const sessionId = `${timestamp}-${random}`;
+    // Create a session ID - use UUID format for Zed compatibility
+    const sessionId = this.generateSessionId();
     
     if (!globalResourceManager.addSession(sessionId)) {
       throw new Error('Maximum concurrent sessions reached');
@@ -1570,8 +1570,6 @@ export class ClaudeACPAgent implements Agent {
   private enhanceWebContent(outputText: string, toolName: string): string {
     try {
       // Try to extract structured information from web content
-      const lines = outputText.split('\n');
-      const firstLine = lines[0] || '';
       
       if (toolName === 'WebSearch') {
         // Look for search result patterns
@@ -1646,7 +1644,7 @@ export class ClaudeACPAgent implements Agent {
    * Extract domains from web content.
    */
   private extractDomains(text: string): string[] {
-    const domainPattern = /https?:\/\/([^\/\s]+)/g;
+    const domainPattern = /https?:\/\/([^/\s]+)/g;
     const domains = new Set<string>();
     let match;
     
@@ -3357,5 +3355,28 @@ export class ClaudeACPAgent implements Agent {
     this.sessionLocks.clear();
     
     this.logger.info('ACP Agent destroyed and cleaned up');
+  }
+
+  /**
+   * Generate session ID with UUID format for Zed compatibility
+   */
+  private generateSessionId(): string {
+    return randomUUID();
+  }
+
+  /**
+   * Check if session ID is valid UUID format
+   */
+  private isUUIDFormat(sessionId: string): boolean {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(sessionId);
+  }
+
+  /**
+   * Check if session ID is legacy format
+   */
+  private isLegacyFormat(sessionId: string): boolean {
+    const legacyRegex = /^[a-z0-9]{8}-[a-z0-9]{11}$/;
+    return legacyRegex.test(sessionId);
   }
 }
