@@ -1606,7 +1606,7 @@ export class ClaudeACPAgent implements Agent {
     }
     
     // Format as system message banner for clear agent identification
-    return `> [!NOTE] 🤖 Agent Task Progress\n> ${taskStatus}`;
+    return `> [!NOTE] ◈ Agent Task Progress\n> ${taskStatus}`;
   }
 
   /**
