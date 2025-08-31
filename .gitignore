@@ -38,4 +38,6 @@ NEXT_STEPS.md
 # Test files (temporary, not tracked)
 test-*.js
 *test-report*.json
+*test-report*.md
 session-*test*.json
+*TEST-REPORT*.md
