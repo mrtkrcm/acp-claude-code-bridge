@@ -351,10 +351,11 @@ export class ClaudeACPAgent implements Agent {
 
     this.sessions.set(sessionId, sessionData);
     
-    // Persist session metadata
+    // Persist session metadata (claudeSessionId will be added later when obtained from Claude SDK)
     try {
       await this.sessionPersistence.saveSession({
         sessionId,
+        claudeSessionId: undefined, // Will be updated when first message is processed
         permissionMode: this.defaultPermissionMode,
         createdAt: new Date().toISOString(),
         metadata: {
@@ -370,6 +371,7 @@ export class ClaudeACPAgent implements Agent {
           try {
             await this.sessionPersistence.saveSession({
               sessionId,
+              claudeSessionId: undefined, // Will be updated when first message is processed
               permissionMode: this.defaultPermissionMode,
               createdAt: new Date().toISOString(),
               metadata: { userAgent: 'ACP-Claude-Code-Bridge', version: '0.10.0' }
@@ -657,6 +659,11 @@ export class ClaudeACPAgent implements Agent {
             session.claudeSessionId = sdkMessage.session_id;
             // Update the session in the map to ensure persistence
             this.sessions.set(currentSessionId, session);
+            
+            // ✅ FIX: Persist claudeSessionId immediately when obtained
+            this.persistSessionState(currentSessionId).catch(error => {
+              this.logger.warn(`Failed to persist claudeSessionId: ${error}`, { sessionId: currentSessionId });
+            });
           }
         }
 
@@ -690,6 +697,9 @@ export class ClaudeACPAgent implements Agent {
 
       // Ensure the session is properly saved with the Claude session_id
       this.sessions.set(currentSessionId, session);
+
+      // ✅ FIX: Persist final session state including claudeSessionId for conversation continuity
+      await this.persistSessionState(currentSessionId);
 
       return {
         stopReason: "end_turn",
@@ -727,6 +737,11 @@ export class ClaudeACPAgent implements Agent {
     } finally {
       session.pendingPrompt = null;
       session.abortController = null;
+      
+      // ✅ FIX: Ensure session state is persisted even on error/cancellation
+      this.persistSessionState(currentSessionId).catch(error => {
+        this.logger.warn(`Failed to persist session state in finally block: ${error}`, { sessionId: currentSessionId });
+      });
     }
   }
 
@@ -2427,6 +2442,46 @@ export class ClaudeACPAgent implements Agent {
       // Don't throw - this is a background operation
       this.logger.warn(`Context stats persistence failed: ${error}`, { sessionId });
     }
+  }
+
+  private async persistSessionState(sessionId: string, maxRetries = 3): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    
+    let lastError: Error | null = null;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const existingSession = await this.sessionPersistence.loadSession(sessionId);
+        if (existingSession) {
+          // ✅ FIX: Save the critical claudeSessionId for conversation continuity
+          await this.sessionPersistence.saveSession({
+            ...existingSession,
+            claudeSessionId: session.claudeSessionId,
+            permissionMode: session.permissionMode || this.defaultPermissionMode,
+            lastAccessed: new Date().toISOString()
+          });
+          
+          this.logger.debug(`Persisted session state including claudeSessionId: ${session.claudeSessionId}`, {
+            sessionId,
+            claudeSessionId: session.claudeSessionId,
+            attempt
+          });
+          return; // Success
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        
+        if (attempt < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Cap at 5s
+          this.logger.warn(`Session persistence attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms: ${error}`, { sessionId });
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    
+    // All retries failed - log but don't throw for background operations
+    this.logger.error(`Failed to persist session after ${maxRetries} attempts: ${lastError}`, { sessionId });
   }
 
   private shouldBatchToolCalls(toolNames: string[]): boolean {

@@ -67,6 +67,7 @@ export class SessionPersistenceManager {
    */
   async saveSession(sessionData: Partial<PersistedSessionData> & { sessionId: string }): Promise<void> {
     const sessionPath = this.getSessionPath(sessionData.sessionId);
+    const tempPath = `${sessionPath}.tmp.${Date.now()}.${process.pid}`;
     
     const data: PersistedSessionData = {
       ...sessionData,
@@ -75,14 +76,24 @@ export class SessionPersistenceManager {
     };
 
     try {
-      // Ensure directory exists
-      await mkdir(dirname(sessionPath), { recursive: true });
+      // Ensure directory exists with proper error handling
+      await this.ensureSessionDirectory(sessionPath);
       
-      // Write session data
+      // Atomic write: write to temp file first, then rename
       const serialized = JSON.stringify(data, null, 2);
-      await writeFile(sessionPath, serialized, 'utf8');
+      await writeFile(tempPath, serialized, 'utf8');
+      
+      // Atomic rename - this is atomic on most filesystems
+      const { rename } = await import('node:fs/promises');
+      await rename(tempPath, sessionPath);
       
     } catch (error) {
+      // Cleanup temp file on failure
+      try {
+        const { unlink } = await import('node:fs/promises');
+        await unlink(tempPath);
+      } catch { /* ignore cleanup errors */ }
+      
       throw new Error(`Failed to save session ${sessionData.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -101,10 +112,8 @@ export class SessionPersistenceManager {
       const data = await readFile(sessionPath, 'utf8');
       const sessionData: PersistedSessionData = JSON.parse(data);
       
-      // Update last accessed time
-      sessionData.lastAccessed = new Date().toISOString();
-      await this.saveSession(sessionData);
-      
+      // Return session data without automatic lastAccessed update
+      // This prevents race conditions and unnecessary writes on every read
       return sessionData;
       
     } catch (error) {
@@ -278,6 +287,20 @@ export class SessionPersistenceManager {
 
   private getSessionPath(sessionId: string): string {
     return resolve(this.baseDir, `${sessionId}.json`);
+  }
+
+  /**
+   * Ensure session directory exists with proper race condition handling
+   */
+  private async ensureSessionDirectory(sessionPath: string): Promise<void> {
+    try {
+      await mkdir(dirname(sessionPath), { recursive: true });
+    } catch (error: unknown) {
+      // EEXIST is acceptable - directory already exists
+      if (error && typeof error === 'object' && 'code' in error && error.code !== 'EEXIST') {
+        throw error;
+      }
+    }
   }
 
   /**
