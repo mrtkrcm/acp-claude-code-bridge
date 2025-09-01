@@ -901,13 +901,27 @@ export class ClaudeACPAgent implements Agent {
     const { operationType, affectedFiles, toolName } = context;
     
     if (affectedFiles && affectedFiles.length > 0) {
-      const fileName = affectedFiles[0].split('/').pop() || affectedFiles[0];
       const action = operationType ? operationType.charAt(0).toUpperCase() + operationType.slice(1) : toolName;
       
-      if (affectedFiles.length === 1) {
-        return `${action}: ${fileName}`;
+      // For read and write operations, show full file path
+      if (operationType === "read" || operationType === "create" || operationType === "edit") {
+        const filePath = affectedFiles[0];
+        
+        if (affectedFiles.length === 1) {
+          return `${action}: ${filePath}`;
+        } else {
+          const fileName = filePath.split('/').pop() || filePath;
+          return `${action}: ${fileName} (+${affectedFiles.length - 1} files)`;
+        }
       } else {
-        return `${action}: ${fileName} (+${affectedFiles.length - 1} files)`;
+        // For other operations, show just filename to keep titles concise
+        const fileName = affectedFiles[0].split('/').pop() || affectedFiles[0];
+        
+        if (affectedFiles.length === 1) {
+          return `${action}: ${fileName}`;
+        } else {
+          return `${action}: ${fileName} (+${affectedFiles.length - 1} files)`;
+        }
       }
     }
     

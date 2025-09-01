@@ -176,7 +176,7 @@ describe('Enhanced ACP Features - Complete Implementation', () => {
       }
       
       const title = agent['generateEnhancedToolTitle'](context)
-      expect(title).toBe('Edit: test.ts')
+      expect(title).toBe('Edit: /src/test.ts')
     })
 
     it('should generate enhanced titles for command operations', () => {
