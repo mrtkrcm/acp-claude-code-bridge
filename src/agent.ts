@@ -1078,7 +1078,7 @@ export class ClaudeACPAgent implements Agent {
   }
   
   /**
-   * Formats tool output with context-aware enhancements
+   * Formats tool output with rich context and shell environment details
    */
   private formatToolOutput(context: ToolOperationContext, output: string): string {
     const { operationType, affectedFiles } = context;
@@ -1095,17 +1095,33 @@ export class ClaudeACPAgent implements Agent {
       case "delete":
         return output.startsWith('[DEL]') ? output : `[DEL] File deleted${fileContext}\n${output}`;
       case "execute":
-        if (output.startsWith('$')) return output;
-        // Include the actual command that was executed
+        if (output.startsWith('$') || output.startsWith('┌─')) return output;
+        // Include the actual command that was executed with rich context
         const command = this.extractCommand(context.input);
-        const commandHeader = command ? `$ ${command}` : '$ Command executed';
-        return `${commandHeader}\n${output}`;
+        const timestamp = new Date().toLocaleTimeString();
+        const user = process.env.USER || process.env.USERNAME || 'user';
+        const cwd = process.cwd().replace(process.env.HOME || '/home/user', '~');
+        
+        const richHeader = `┌─ ⚡ EXECUTE │ ${context.toolName} │ ${timestamp} ─\n│ 📍 ${user}@${process.platform} ${cwd}\n├─────────────────────────────────────────────`;
+        const commandLine = command ? `$ ${command}` : '$ Command executed';
+        return `${richHeader}\n${commandLine}\n${output}`;
       case "edit":
         return output.startsWith('[EDIT]') ? output : `[EDIT] File modified${fileContext}\n${output}`;
       case "search":
         return output.startsWith('[SEARCH]') ? output : `[SEARCH] Search completed\n${output}`;
       case "read":
-        return output.startsWith('[READ]') ? output : `[READ] File read${fileContext}\n${output}`;
+        if (output.startsWith('[READ]') || output.startsWith('┌─')) return output;
+        const readTimestamp = new Date().toLocaleTimeString();
+        const readUser = process.env.USER || process.env.USERNAME || 'user';
+        const readCwd = process.cwd().replace(process.env.HOME || '/home/user', '~');
+        const filePath = affectedFiles && affectedFiles[0] ? affectedFiles[0] : '';
+        
+        const readHeader = `┌─ 📖 READ │ ${context.toolName} │ ${readTimestamp} ─\n│ 📍 ${readUser}@${process.platform} ${readCwd}\n│ 📄 ${filePath}\n├─────────────────────────────────────────────`;
+        const lines = output.split('\n').length;
+        const size = output.length;
+        const contentInfo = lines > 10 || size > 500 ? `📖 Reading file (${lines} lines, ${size} chars)` : '📖 File contents:';
+        
+        return `${readHeader}\n${contentInfo}\n\n${output}`;
       default:
         return fileContext ? `Operation on${fileContext}\n${output}` : output;
     }
