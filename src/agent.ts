@@ -495,7 +495,7 @@ export class ClaudeACPAgent implements Agent {
       update: {
         sessionUpdate: "tool_call",
         toolCallId,
-        title: this.enhanceToolTitle(sessionId, enhancedTitle, "pending"),
+        title: this.enhanceToolTitle(sessionId, enhancedTitle, "pending", operationContext.operationType),
         kind: this.mapToolKind(toolName),
         status: "pending",
         rawInput: msg.input as Record<string, unknown>,
@@ -804,9 +804,9 @@ export class ClaudeACPAgent implements Agent {
   /**
    * Enhances tool titles with status indicators
    */
-  private enhanceToolTitle(sessionId: string, baseTitle: string, status: "pending" | "in_progress" | "completed" | "failed"): string {
+  private enhanceToolTitle(sessionId: string, baseTitle: string, status: "pending" | "in_progress" | "completed" | "failed", operationType?: string): string {
     const statusIndicators = {
-      pending: "[PEND]",
+      pending: "[WAIT]",
       in_progress: "[RUN]",
       completed: "[OK]",
       failed: "[FAIL]"
@@ -818,8 +818,9 @@ export class ClaudeACPAgent implements Agent {
     // Add status indicator (without redundant text)
     indicators.push(statusIndicators[status]);
     
-    // Add permission context only for non-ready events (pending, in_progress, failed)
-    if (status !== "completed") {
+    // Add permission context only for non-ready events and non-readonly operations
+    const isNonReadonly = this.isNonReadonlyOperation(operationType, baseTitle);
+    if (status !== "completed" && isNonReadonly) {
       if (session.permissionMode === "bypassPermissions") {
         indicators.push("⏵⏵ bypass");
       } else if (session.permissionMode === "acceptEdits") {
@@ -835,6 +836,36 @@ export class ClaudeACPAgent implements Agent {
     }
     
     return `${indicatorString} - ${baseTitle}`;
+  }
+
+  /**
+   * Determines if operation is non-readonly (modifies data/state)
+   */
+  private isNonReadonlyOperation(operationType?: string, baseTitle?: string): boolean {
+    // Check explicit operation type first
+    if (operationType) {
+      const nonReadonlyTypes = ["create", "edit", "delete", "move", "execute"];
+      return nonReadonlyTypes.includes(operationType);
+    }
+    
+    // Fallback to title analysis for operations without explicit type
+    if (baseTitle) {
+      const title = baseTitle.toLowerCase();
+      // Non-readonly patterns
+      if (title.includes('write') || title.includes('create') || title.includes('edit') || 
+          title.includes('delete') || title.includes('move') || title.includes('execute') ||
+          title.includes('bash') || title.includes('run') || title.includes('modify')) {
+        return true;
+      }
+      // Readonly patterns  
+      if (title.includes('read') || title.includes('search') || title.includes('grep') ||
+          title.includes('find') || title.includes('view') || title.includes('cat')) {
+        return false;
+      }
+    }
+    
+    // Default to non-readonly for safety (show bypass indicators when uncertain)
+    return true;
   }
   
   /**
