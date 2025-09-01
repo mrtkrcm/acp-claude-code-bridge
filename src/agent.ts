@@ -1209,99 +1209,99 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
-   * Gets file type icon based on file extension
+   * Gets file type indicator based on file extension
    */
   private getFileTypeIcon(filePath: string): string {
-    if (!filePath) return '📄';
+    if (!filePath) return '[FILE]';
     
     const ext = filePath.split('.').pop()?.toLowerCase();
-    if (!ext) return '📄';
+    if (!ext) return '[FILE]';
     
     const iconMap: Record<string, string> = {
       // JavaScript/TypeScript
-      'js': '🟨',
-      'jsx': '🟨', 
-      'ts': '🔷',
-      'tsx': '🔷',
-      'mjs': '🟨',
-      'cjs': '🟨',
+      'js': '[JS]',
+      'jsx': '[JSX]', 
+      'ts': '[TS]',
+      'tsx': '[TSX]',
+      'mjs': '[MJS]',
+      'cjs': '[CJS]',
       
       // Web files
-      'html': '🌐',
-      'htm': '🌐',
-      'css': '🎨',
-      'scss': '🎨',
-      'sass': '🎨',
-      'less': '🎨',
+      'html': '[HTML]',
+      'htm': '[HTML]',
+      'css': '[CSS]',
+      'scss': '[SCSS]',
+      'sass': '[SASS]',
+      'less': '[LESS]',
       
       // Python
-      'py': '🐍',
-      'pyw': '🐍',
-      'pyc': '🐍',
+      'py': '[PY]',
+      'pyw': '[PY]',
+      'pyc': '[PYC]',
       
       // Other languages
-      'rs': '🦀',
-      'go': '🐹',
-      'java': '☕',
-      'kt': '🟣',
-      'swift': '🧡',
-      'c': '⚙️',
-      'cpp': '⚙️',
-      'cc': '⚙️',
-      'cxx': '⚙️',
-      'h': '⚙️',
-      'hpp': '⚙️',
-      'cs': '💜',
-      'php': '🐘',
-      'rb': '💎',
+      'rs': '[RUST]',
+      'go': '[GO]',
+      'java': '[JAVA]',
+      'kt': '[KOTLIN]',
+      'swift': '[SWIFT]',
+      'c': '[C]',
+      'cpp': '[CPP]',
+      'cc': '[CPP]',
+      'cxx': '[CPP]',
+      'h': '[H]',
+      'hpp': '[HPP]',
+      'cs': '[CS]',
+      'php': '[PHP]',
+      'rb': '[RUBY]',
       
       // Data formats
-      'json': '📋',
-      'yaml': '📋',
-      'yml': '📋',
-      'xml': '📋',
-      'csv': '📊',
-      'sql': '🗄️',
+      'json': '[JSON]',
+      'yaml': '[YAML]',
+      'yml': '[YAML]',
+      'xml': '[XML]',
+      'csv': '[CSV]',
+      'sql': '[SQL]',
       
       // Documentation
-      'md': '📝',
-      'txt': '📝',
-      'rst': '📝',
-      'doc': '📝',
-      'docx': '📝',
-      'pdf': '📕',
+      'md': '[MD]',
+      'txt': '[TXT]',
+      'rst': '[RST]',
+      'doc': '[DOC]',
+      'docx': '[DOCX]',
+      'pdf': '[PDF]',
       
       // Config files
-      'config': '⚙️',
-      'conf': '⚙️',
-      'ini': '⚙️',
-      'env': '⚙️',
-      'toml': '⚙️',
+      'config': '[CONFIG]',
+      'conf': '[CONF]',
+      'ini': '[INI]',
+      'env': '[ENV]',
+      'toml': '[TOML]',
       
       // Package files
-      'package': '📦',
-      'lock': '🔒',
-      'cargo': '📦',
-      'requirements': '📦',
-      'pipfile': '📦',
+      'package': '[PKG]',
+      'lock': '[LOCK]',
+      'cargo': '[CARGO]',
+      'requirements': '[REQ]',
+      'pipfile': '[PIP]',
       
       // Images
-      'png': '🖼️',
-      'jpg': '🖼️',
-      'jpeg': '🖼️',
-      'gif': '🖼️',
-      'svg': '🖼️',
-      'webp': '🖼️',
+      'png': '[PNG]',
+      'jpg': '[JPG]',
+      'jpeg': '[JPEG]',
+      'gif': '[GIF]',
+      'svg': '[SVG]',
+      'webp': '[WEBP]',
       
       // Archives
-      'zip': '📦',
-      'tar': '📦',
-      'gz': '📦',
-      'rar': '📦',
-      '7z': '📦'
+      'zip': '[ZIP]',
+      'tar': '[TAR]',
+      'gz': '[GZ]',
+      'rar': '[RAR]',
+      '7z': '[7Z]'
     };
     
-    return iconMap[ext] || '📄';
+    return iconMap[ext] || '[FILE]';
   }
 
   /**
@@ -1348,11 +1348,11 @@ export class ClaudeACPAgent implements Agent {
    */
   private highlightJavaScript(line: string): string {
     return line
-      .replace(/\b(const|let|var|function|class|if|else|for|while|return|import|export|from|interface|type)\b/g, '🔷$1')
-      .replace(/\/\/(.*)/g, '💬$1')
-      .replace(/"([^"]*)"/g, '🟩"$1"')
-      .replace(/'([^']*)'/g, '🟩\'$1\'')
-      .replace(/`([^`]*)`/g, '🟩`$1`');
+      .replace(/\b(const|let|var|function|class|if|else|for|while|return|import|export|from|interface|type)\b/g, '[K]$1')
+      .replace(/\/\/(.*)/g, '[C]$1')
+      .replace(/"([^"]*)"/g, '[S]"$1"')
+      .replace(/'([^']*)'/g, '[S]\'$1\'')
+      .replace(/`([^`]*)`/g, '[S]`$1`');
   }
 
   /**
@@ -1360,10 +1360,10 @@ export class ClaudeACPAgent implements Agent {
    */
   private highlightPython(line: string): string {
     return line
-      .replace(/\b(def|class|if|elif|else|for|while|return|import|from|try|except)\b/g, '🔷$1')
-      .replace(/#(.*)/g, '💬$1')
-      .replace(/"([^"]*)"/g, '🟩"$1"')
-      .replace(/'([^']*)'/g, '🟩\'$1\'');
+      .replace(/\b(def|class|if|elif|else|for|while|return|import|from|try|except)\b/g, '[K]$1')
+      .replace(/#(.*)/g, '[C]$1')
+      .replace(/"([^"]*)"/g, '[S]"$1"')
+      .replace(/'([^']*)'/g, '[S]\'$1\'');
   }
 
   /**
@@ -1371,9 +1371,9 @@ export class ClaudeACPAgent implements Agent {
    */
   private highlightJSON(line: string): string {
     return line
-      .replace(/"([^"]*)":/g, '🔷"$1":')
-      .replace(/:\s*"([^"]*)"/g, ': 🟩"$1"')
-      .replace(/:\s*(true|false|null|\d+)/g, ': 🟡$1');
+      .replace(/"([^"]*)":/g, '[K]"$1":')
+      .replace(/:\s*"([^"]*)"/g, ': [S]"$1"')
+      .replace(/:\s*(true|false|null|\d+)/g, ': [V]$1');
   }
 
   /**
@@ -1381,10 +1381,10 @@ export class ClaudeACPAgent implements Agent {
    */
   private highlightMarkdown(line: string): string {
     return line
-      .replace(/^(#{1,6})\s+(.*)/g, '🔷$1 $2')
-      .replace(/\*\*(.*?)\*\*/g, '🟡**$1**')
-      .replace(/\*(.*?)\*/g, '🟩*$1*')
-      .replace(/`([^`]*)`/g, '🟦`$1`');
+      .replace(/^(#{1,6})\s+(.*)/g, '[H]$1 $2')
+      .replace(/\*\*(.*?)\*\*/g, '[B]**$1**')
+      .replace(/\*(.*?)\*/g, '[I]*$1*')
+      .replace(/`([^`]*)`/g, '[C]`$1`');
   }
 
   /**
@@ -1407,27 +1407,27 @@ export class ClaudeACPAgent implements Agent {
         inDiff = true;
         const parts = line.split('→');
         if (parts.length === 2) {
-          diffLines.push(`🟥 - ${parts[0].trim()}`);
-          diffLines.push(`🟩 + ${parts[1].trim()}`);
+          diffLines.push(`[-] ${parts[0].trim()}`);
+          diffLines.push(`[+] ${parts[1].trim()}`);
           continue;
         }
       }
       
       if (line.trim().startsWith('-') || line.includes('removed')) {
         inDiff = true;
-        diffLines.push(`🟥 ${line}`);
+        diffLines.push(`[-] ${line}`);
         continue;
       }
       
       if (line.trim().startsWith('+') || line.includes('added')) {
         inDiff = true;
-        diffLines.push(`🟩 ${line}`);
+        diffLines.push(`[+] ${line}`);
         continue;
       }
       
       if (line.includes('@@') || line.includes('diff')) {
         inDiff = true;
-        diffLines.push(`🔷 ${line}`);
+        diffLines.push(`[DIFF] ${line}`);
         continue;
       }
 
