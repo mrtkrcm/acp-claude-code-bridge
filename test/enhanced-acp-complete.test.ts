@@ -261,7 +261,7 @@ describe('Enhanced ACP Features - Complete Implementation', () => {
       expect(content).toHaveLength(1)
       expect(content[0].type).toBe('content')
       expect(content[0].content?.type).toBe('text')
-      expect(content[0].content?.text).toBe('$ Command executed\ntotal 8\ndrwxr-xr-x  2 user  staff')
+      expect(content[0].content?.text).toBe('$ ls -la\ntotal 8\ndrwxr-xr-x  2 user  staff')
     })
   })
 
@@ -420,7 +420,7 @@ describe('Enhanced ACP Features - Complete Implementation', () => {
         input: { command: 'ls' },
         operationType: 'execute' as const
       }
-      expect(agent['formatToolOutput'](executeContext, 'file1.txt file2.txt')).toBe('$ Command executed\nfile1.txt file2.txt')
+      expect(agent['formatToolOutput'](executeContext, 'file1.txt file2.txt')).toBe('$ ls\nfile1.txt file2.txt')
     })
 
     it('should not duplicate existing indicators', () => {

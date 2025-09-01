@@ -1095,7 +1095,11 @@ export class ClaudeACPAgent implements Agent {
       case "delete":
         return output.startsWith('[DEL]') ? output : `[DEL] File deleted${fileContext}\n${output}`;
       case "execute":
-        return output.startsWith('$') ? output : `$ Command executed\n${output}`;
+        if (output.startsWith('$')) return output;
+        // Include the actual command that was executed
+        const command = this.extractCommand(context.input);
+        const commandHeader = command ? `$ ${command}` : '$ Command executed';
+        return `${commandHeader}\n${output}`;
       case "edit":
         return output.startsWith('[EDIT]') ? output : `[EDIT] File modified${fileContext}\n${output}`;
       case "search":
@@ -1105,6 +1109,22 @@ export class ClaudeACPAgent implements Agent {
       default:
         return fileContext ? `Operation on${fileContext}\n${output}` : output;
     }
+  }
+
+  /**
+   * Extracts command from input for display purposes
+   */
+  private extractCommand(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+    
+    const inputObj = input;
+    if (inputObj.command) {
+      const cmd = String(inputObj.command);
+      // Truncate very long commands for readability
+      return cmd.length > 60 ? cmd.substring(0, 57) + '...' : cmd;
+    }
+    
+    return null;
   }
   
   /**
