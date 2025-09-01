@@ -1,3 +1,27 @@
+## [0.17.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.16.0...v0.17.0) (2025-09-01)
+
+### Features
+
+* **ui**: enhance tool status indicators and file path display
+  - Remove redundant status text from tool indicators (`[PEND]` vs `[PEND] pending`)
+  - Show bypass/accept modes only for non-completed events
+  - Add full file paths to read/write/edit tool titles for better context
+  - Improve visual clarity and reduce noise in tool status display
+
+* **logging**: implement enhanced startup configuration logging
+  - Add comprehensive startup configuration display inspired by Gemini CLI
+  - Show permission mode and max turns with source attribution
+  - Display debug mode, log file, and active feature status
+  - Provide transparency for troubleshooting and configuration validation
+
+### Research & Analysis
+
+* **architecture**: comprehensive Gemini CLI research and competitive analysis
+  - Analyzed Gemini CLI ACP implementation patterns and best practices
+  - Identified learning opportunities and architectural improvements
+  - Confirmed our implementation's competitive advantages in stability and UX
+  - Applied beneficial transparency patterns while maintaining our quality edge
+
 ## [0.16.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.15.0...v0.16.0) (2025-09-01)
 
 ### Features
