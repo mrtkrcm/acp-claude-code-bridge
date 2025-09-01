@@ -1,3 +1,27 @@
+## [0.18.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.17.0...v0.18.0) (2025-09-01)
+
+### Features
+
+* **ui**: implement rich tool output formatting with comprehensive shell context
+  - Add structured visual headers with box drawing characters and operation icons
+  - Include real-time timestamps, user@platform, and working directory information  
+  - Display actual commands executed instead of generic "Command executed" messages
+  - Show file information including paths, sizes, and line counts in organized headers
+  - Enhance read operations with content preview indicators for large files
+  - Maintain backward compatibility while providing richer visual feedback
+
+* **execution**: enhance command and file operation visibility
+  - Show actual shell commands with proper context and environment details
+  - Add comprehensive metadata footers with execution information
+  - Include visual separators and structured formatting for better readability
+  - Provide file content previews and size information for read operations
+
+### Technical Improvements
+
+* **testing**: update test expectations to match enhanced rich formatting output
+* **compatibility**: maintain all existing functionality while adding rich visual enhancements
+* **performance**: efficient formatting without impacting operation execution speed
+
 ## [0.17.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.16.0...v0.17.0) (2025-09-01)
 
 ### Features
