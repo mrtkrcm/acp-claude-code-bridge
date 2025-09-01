@@ -291,23 +291,7 @@ export class ClaudeACPAgent implements Agent {
         await this.generateAndSendPlan(sessionId, complexity);
       }
       
-      // Send thinking indicator with annotations
-      const thinkingAnnotations = this.generateContentAnnotations(
-        { toolName: "system", input: {}, operationType: "other" },
-        "Thinking"
-      );
-      
-      await this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: { 
-            type: "text", 
-            text: "Thinking...",
-            annotations: thinkingAnnotations.system ? thinkingAnnotations : undefined
-          },
-        },
-      });
+      // Remove thinking message - start processing directly
       
       // Resource management for message processing
       operationId = `claude-query-${sessionId}-${Date.now()}`;
@@ -766,12 +750,7 @@ export class ClaudeACPAgent implements Agent {
     // Always add plan mode indicator (we're in plan mode if this is called)
     indicators.push("⏸ plan mode");
     
-    // Permission mode indicators
-    if (session.permissionMode === "bypassPermissions") {
-      indicators.push("⏵⏵ bypass");
-    } else if (session.permissionMode === "acceptEdits") {
-      indicators.push("⏵⏵ accept");
-    }
+    // Permission mode indicators - removed from here, only shown at start
     
     // Debug mode indicator
     if (process.env.ACP_DEBUG === "true") {
@@ -814,15 +793,7 @@ export class ClaudeACPAgent implements Agent {
     const session = this.getSession(sessionId);
     const indicators: string[] = [];
     
-    // Add permission context only for non-readonly operations when not completed
-    const isNonReadonly = this.isNonReadonlyOperation(operationType, baseTitle);
-    if (status !== "completed" && isNonReadonly) {
-      if (session.permissionMode === "bypassPermissions") {
-        indicators.push("⏵⏵ bypass");
-      } else if (session.permissionMode === "acceptEdits") {
-        indicators.push("⏵⏵ accept");
-      }
-    }
+    // Permission indicators removed - only shown at session start
     
     if (indicators.length === 0) {
       return baseTitle; // No indicators to add
@@ -1078,52 +1049,108 @@ export class ClaudeACPAgent implements Agent {
   }
   
   /**
+   * Formats error output with clean, readable formatting
+   */
+  private formatErrorOutput(context: ToolOperationContext, error: string | Error, errorCode?: string): string {
+    const { toolName, affectedFiles } = context;
+    const filePath = affectedFiles && affectedFiles[0] ? affectedFiles[0] : '';
+    const multipleFiles = affectedFiles && affectedFiles.length > 1 ? ` (+${affectedFiles.length - 1} files)` : '';
+    
+    const errorMessage = error instanceof Error ? error.message : error;
+    const errorName = error instanceof Error ? error.name : 'Error';
+    const code = errorCode || (error instanceof Error && 'code' in error ? error.code as string : '');
+    
+    const header = `[ERROR] ${toolName}${filePath ? ` - ${filePath}${multipleFiles}` : ''}`;
+    const errorInfo = code ? `${errorName} (${code})` : errorName;
+    
+    return `${header}\n${errorInfo}: ${errorMessage}`;
+  }
+
+  /**
    * Formats tool output with rich context and shell environment details
    */
   private formatToolOutput(context: ToolOperationContext, output: string): string {
     const { operationType, affectedFiles } = context;
     
-    // Include file path context in output formatting
-    const fileContext = affectedFiles && affectedFiles.length > 0 
-      ? ` (${affectedFiles[0]}${affectedFiles.length > 1 ? ` +${affectedFiles.length - 1} files` : ''})`
-      : '';
+    // Get file path for display
+    const filePath = affectedFiles && affectedFiles[0] ? affectedFiles[0] : '';
+    const multipleFiles = affectedFiles && affectedFiles.length > 1 ? ` (+${affectedFiles.length - 1} files)` : '';
     
-    // Add visual indicators based on operation type
+    // Simple, clean formatting focused on file names and content
     switch (operationType) {
       case "create":
-        return output.startsWith('[✓]') ? output : `[✓] File created${fileContext}\n${output}`;
+        if (output.startsWith('[CREATE]') || output.startsWith('[✓]')) return output;
+        const createIcon = this.getFileTypeIcon(filePath);
+        return `[CREATE] ${createIcon} ${filePath}${multipleFiles}\n${output}`;
+        
       case "delete":
-        return output.startsWith('[DEL]') ? output : `[DEL] File deleted${fileContext}\n${output}`;
+        if (output.startsWith('[DELETE]') || output.startsWith('[DEL]')) return output;
+        const deleteIcon = this.getFileTypeIcon(filePath);
+        return `[DELETE] ${deleteIcon} ${filePath}${multipleFiles}\n${output}`;
+        
       case "execute":
-        if (output.startsWith('$') || output.startsWith('┌─')) return output;
-        // Include the actual command that was executed with rich context
+        if (output.startsWith('$')) return output;
         const command = this.extractCommand(context.input);
-        const timestamp = new Date().toLocaleTimeString();
-        const user = process.env.USER || process.env.USERNAME || 'user';
-        const cwd = process.cwd().replace(process.env.HOME || '/home/user', '~');
-        
-        const richHeader = `┌─ ⚡ EXECUTE │ ${context.toolName} │ ${timestamp} ─\n│ 📍 ${user}@${process.platform} ${cwd}\n├─────────────────────────────────────────────`;
         const commandLine = command ? `$ ${command}` : '$ Command executed';
-        return `${richHeader}\n${commandLine}\n${output}`;
+        return `${commandLine}\n${output}`;
+        
       case "edit":
-        return output.startsWith('[EDIT]') ? output : `[EDIT] File modified${fileContext}\n${output}`;
+        if (output.startsWith('[EDIT]') || output.startsWith('[EDIT]')) return output;
+        const editIcon = this.getFileTypeIcon(filePath);
+        const diffOutput = this.createDiffVisualization(output, filePath);
+        return `[EDIT] ${editIcon} ${filePath}${multipleFiles}\n${diffOutput}`;
+        
       case "search":
-        return output.startsWith('[SEARCH]') ? output : `[SEARCH] Search completed\n${output}`;
+        if (output.startsWith('[SEARCH]')) return output;
+        return `[SEARCH] Pattern: ${this.extractSearchPattern(context.input) || 'unknown'}\n${output}`;
+        
       case "read":
-        if (output.startsWith('[READ]') || output.startsWith('┌─')) return output;
-        const readTimestamp = new Date().toLocaleTimeString();
-        const readUser = process.env.USER || process.env.USERNAME || 'user';
-        const readCwd = process.cwd().replace(process.env.HOME || '/home/user', '~');
-        const filePath = affectedFiles && affectedFiles[0] ? affectedFiles[0] : '';
-        
-        const readHeader = `┌─ 📖 READ │ ${context.toolName} │ ${readTimestamp} ─\n│ 📍 ${readUser}@${process.platform} ${readCwd}\n│ 📄 ${filePath}\n├─────────────────────────────────────────────`;
+        if (output.startsWith('[READ]') || output.startsWith('[READ]')) return output;
         const lines = output.split('\n').length;
-        const size = output.length;
-        const contentInfo = lines > 10 || size > 500 ? `📖 Reading file (${lines} lines, ${size} chars)` : '📖 File contents:';
+        const chars = output.length;
+        const fileIcon = this.getFileTypeIcon(filePath);
+        const highlightedOutput = this.addSyntaxHighlighting(output, filePath);
+        return `[READ] ${fileIcon} ${filePath} (${lines} lines, ${chars} chars)\n${highlightedOutput}`;
         
-        return `${readHeader}\n${contentInfo}\n\n${output}`;
       default:
-        return fileContext ? `Operation on${fileContext}\n${output}` : output;
+        // Handle additional operation types in default case
+        const opType = operationType?.toUpperCase() || 'OPERATION';
+        const toolNameLower = context.toolName.toLowerCase();
+        
+        // Handle specific tools
+        if (toolNameLower.includes('write') || context.toolName === 'Write') {
+          const writeLines = output.split('\n').length;
+          const writeChars = output.length;
+          return `[WRITE] ${filePath}${multipleFiles} (${writeLines} lines, ${writeChars} chars)\n${output}`;
+        }
+        
+        if (toolNameLower.includes('webfetch') || toolNameLower.includes('fetch')) {
+          const url = this.extractUrl(context.input);
+          const fetchLines = output.split('\n').length;
+          const fetchChars = output.length;
+          return `[WEBFETCH] ${url || 'URL'} (${fetchLines} lines, ${fetchChars} chars fetched)\n${output}`;
+        }
+        
+        if (toolNameLower.includes('grep') || context.toolName === 'Grep') {
+          const pattern = this.extractSearchPattern(context.input);
+          const results = output.split('\n').filter(line => line.trim().length > 0).length;
+          return `[GREP] Pattern: ${pattern || 'unknown'} (${results} results)\n${output}`;
+        }
+        
+        if (toolNameLower.includes('bash') || context.toolName === 'Bash') {
+          if (output.startsWith('$')) return output;
+          const command = this.extractCommand(context.input);
+          const commandLine = command ? `$ ${command}` : '$ Command executed';
+          return `${commandLine}\n${output}`;
+        }
+        
+        if (toolNameLower.includes('multiedit') || context.toolName === 'MultiEdit') {
+          const editLines = output.split('\n').length;
+          const editChars = output.length;
+          return `[MULTIEDIT] ${filePath}${multipleFiles} (${editLines} lines, ${editChars} chars)\n${output}`;
+        }
+        
+        return filePath ? `[${opType}] ${filePath}${multipleFiles}\n${output}` : output;
     }
   }
 
@@ -1141,6 +1168,280 @@ export class ClaudeACPAgent implements Agent {
     }
     
     return null;
+  }
+
+  /**
+   * Extracts search pattern from input for display purposes
+   */
+  private extractSearchPattern(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+    
+    const inputObj = input;
+    if (inputObj.pattern) {
+      const pattern = String(inputObj.pattern);
+      return pattern.length > 50 ? pattern.substring(0, 47) + '...' : pattern;
+    }
+    if (inputObj.query) {
+      const query = String(inputObj.query);
+      return query.length > 50 ? query.substring(0, 47) + '...' : query;
+    }
+    if (inputObj.text) {
+      const text = String(inputObj.text);
+      return text.length > 50 ? text.substring(0, 47) + '...' : text;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Extracts URL from input for display purposes
+   */
+  private extractUrl(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+    
+    const inputObj = input;
+    if (inputObj.url) {
+      const url = String(inputObj.url);
+      return url.length > 80 ? url.substring(0, 77) + '...' : url;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Gets file type icon based on file extension
+   */
+  private getFileTypeIcon(filePath: string): string {
+    if (!filePath) return '📄';
+    
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    if (!ext) return '📄';
+    
+    const iconMap: Record<string, string> = {
+      // JavaScript/TypeScript
+      'js': '🟨',
+      'jsx': '🟨', 
+      'ts': '🔷',
+      'tsx': '🔷',
+      'mjs': '🟨',
+      'cjs': '🟨',
+      
+      // Web files
+      'html': '🌐',
+      'htm': '🌐',
+      'css': '🎨',
+      'scss': '🎨',
+      'sass': '🎨',
+      'less': '🎨',
+      
+      // Python
+      'py': '🐍',
+      'pyw': '🐍',
+      'pyc': '🐍',
+      
+      // Other languages
+      'rs': '🦀',
+      'go': '🐹',
+      'java': '☕',
+      'kt': '🟣',
+      'swift': '🧡',
+      'c': '⚙️',
+      'cpp': '⚙️',
+      'cc': '⚙️',
+      'cxx': '⚙️',
+      'h': '⚙️',
+      'hpp': '⚙️',
+      'cs': '💜',
+      'php': '🐘',
+      'rb': '💎',
+      
+      // Data formats
+      'json': '📋',
+      'yaml': '📋',
+      'yml': '📋',
+      'xml': '📋',
+      'csv': '📊',
+      'sql': '🗄️',
+      
+      // Documentation
+      'md': '📝',
+      'txt': '📝',
+      'rst': '📝',
+      'doc': '📝',
+      'docx': '📝',
+      'pdf': '📕',
+      
+      // Config files
+      'config': '⚙️',
+      'conf': '⚙️',
+      'ini': '⚙️',
+      'env': '⚙️',
+      'toml': '⚙️',
+      
+      // Package files
+      'package': '📦',
+      'lock': '🔒',
+      'cargo': '📦',
+      'requirements': '📦',
+      'pipfile': '📦',
+      
+      // Images
+      'png': '🖼️',
+      'jpg': '🖼️',
+      'jpeg': '🖼️',
+      'gif': '🖼️',
+      'svg': '🖼️',
+      'webp': '🖼️',
+      
+      // Archives
+      'zip': '📦',
+      'tar': '📦',
+      'gz': '📦',
+      'rar': '📦',
+      '7z': '📦'
+    };
+    
+    return iconMap[ext] || '📄';
+  }
+
+  /**
+   * Adds basic syntax highlighting to code content
+   */
+  private addSyntaxHighlighting(content: string, filePath: string): string {
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    if (!ext) return content;
+
+    // Only highlight small files to avoid performance issues
+    if (content.length > 5000) return content;
+
+    const lines = content.split('\n');
+    const maxLines = 50; // Limit preview lines
+    const previewLines = lines.slice(0, maxLines);
+    
+    const highlighted = previewLines.map(line => {
+      // Simple syntax highlighting patterns
+      switch (ext) {
+        case 'js':
+        case 'jsx':
+        case 'ts':
+        case 'tsx':
+          return this.highlightJavaScript(line);
+        case 'py':
+          return this.highlightPython(line);
+        case 'json':
+          return this.highlightJSON(line);
+        case 'md':
+          return this.highlightMarkdown(line);
+        default:
+          return line;
+      }
+    });
+
+    const result = highlighted.join('\n');
+    const truncated = lines.length > maxLines ? `\n... (${lines.length - maxLines} more lines)` : '';
+    
+    return result + truncated;
+  }
+
+  /**
+   * Simple JavaScript/TypeScript highlighting
+   */
+  private highlightJavaScript(line: string): string {
+    return line
+      .replace(/\b(const|let|var|function|class|if|else|for|while|return|import|export|from|interface|type)\b/g, '🔷$1')
+      .replace(/\/\/(.*)/g, '💬$1')
+      .replace(/"([^"]*)"/g, '🟩"$1"')
+      .replace(/'([^']*)'/g, '🟩\'$1\'')
+      .replace(/`([^`]*)`/g, '🟩`$1`');
+  }
+
+  /**
+   * Simple Python highlighting
+   */
+  private highlightPython(line: string): string {
+    return line
+      .replace(/\b(def|class|if|elif|else|for|while|return|import|from|try|except)\b/g, '🔷$1')
+      .replace(/#(.*)/g, '💬$1')
+      .replace(/"([^"]*)"/g, '🟩"$1"')
+      .replace(/'([^']*)'/g, '🟩\'$1\'');
+  }
+
+  /**
+   * Simple JSON highlighting
+   */
+  private highlightJSON(line: string): string {
+    return line
+      .replace(/"([^"]*)":/g, '🔷"$1":')
+      .replace(/:\s*"([^"]*)"/g, ': 🟩"$1"')
+      .replace(/:\s*(true|false|null|\d+)/g, ': 🟡$1');
+  }
+
+  /**
+   * Simple Markdown highlighting
+   */
+  private highlightMarkdown(line: string): string {
+    return line
+      .replace(/^(#{1,6})\s+(.*)/g, '🔷$1 $2')
+      .replace(/\*\*(.*?)\*\*/g, '🟡**$1**')
+      .replace(/\*(.*?)\*/g, '🟩*$1*')
+      .replace(/`([^`]*)`/g, '🟦`$1`');
+  }
+
+  /**
+   * Creates before/after diff visualization for edit operations
+   */
+  private createDiffVisualization(output: string, filePath: string): string {
+    // Simple diff extraction from common edit tool outputs
+    if (!output.includes('→') && !output.includes('-') && !output.includes('+')) {
+      return output; // No diff indicators found
+    }
+
+    const lines = output.split('\n');
+    const diffLines: string[] = [];
+    let inDiff = false;
+
+    for (const line of lines) {
+      // Detect diff patterns
+      if (line.includes('→')) {
+        // Line replacement format: "123→ new content" or "old content → new content"
+        inDiff = true;
+        const parts = line.split('→');
+        if (parts.length === 2) {
+          diffLines.push(`🟥 - ${parts[0].trim()}`);
+          diffLines.push(`🟩 + ${parts[1].trim()}`);
+          continue;
+        }
+      }
+      
+      if (line.trim().startsWith('-') || line.includes('removed')) {
+        inDiff = true;
+        diffLines.push(`🟥 ${line}`);
+        continue;
+      }
+      
+      if (line.trim().startsWith('+') || line.includes('added')) {
+        inDiff = true;
+        diffLines.push(`🟩 ${line}`);
+        continue;
+      }
+      
+      if (line.includes('@@') || line.includes('diff')) {
+        inDiff = true;
+        diffLines.push(`🔷 ${line}`);
+        continue;
+      }
+
+      // Regular line
+      if (inDiff && line.trim() === '') {
+        diffLines.push(''); // Preserve empty lines in diff
+      } else if (inDiff) {
+        diffLines.push(`  ${line}`); // Context line
+      } else {
+        diffLines.push(line); // Non-diff content
+      }
+    }
+
+    return diffLines.length > lines.length * 0.3 ? diffLines.join('\n') : output;
   }
   
   /**
