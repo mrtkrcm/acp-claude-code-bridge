@@ -789,14 +789,16 @@ export class ClaudeACPAgent implements Agent {
     const session = this.getSession(sessionId);
     const indicators: string[] = [];
     
-    // Add status indicator
-    indicators.push(`${statusIndicators[status]} ${status}`);
+    // Add status indicator (without redundant text)
+    indicators.push(statusIndicators[status]);
     
-    // Add permission context if relevant
-    if (session.permissionMode === "bypassPermissions") {
-      indicators.push("⏵⏵ bypass");
-    } else if (session.permissionMode === "acceptEdits") {
-      indicators.push("⏵⏵ accept");
+    // Add permission context only for non-ready events (pending, in_progress, failed)
+    if (status !== "completed") {
+      if (session.permissionMode === "bypassPermissions") {
+        indicators.push("⏵⏵ bypass");
+      } else if (session.permissionMode === "acceptEdits") {
+        indicators.push("⏵⏵ accept");
+      }
     }
     
     const indicatorString = indicators.join(" ");
