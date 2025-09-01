@@ -256,12 +256,12 @@ describe('Enhanced ACP Features - Complete Implementation', () => {
         operationType: 'execute' as const
       }
       
-      const content = agent['generateEnhancedToolContent'](context, 'total 8\\ndrwxr-xr-x  2 user  staff')
+      const content = agent['generateEnhancedToolContent'](context, 'total 8\ndrwxr-xr-x  2 user  staff')
       
       expect(content).toHaveLength(1)
       expect(content[0].type).toBe('content')
       expect(content[0].content?.type).toBe('text')
-      expect(content[0].content?.text).toBe('$ total 8\\ndrwxr-xr-x  2 user  staff')
+      expect(content[0].content?.text).toBe('$ Command executed\ntotal 8\ndrwxr-xr-x  2 user  staff')
     })
   })
 
@@ -402,23 +402,25 @@ describe('Enhanced ACP Features - Complete Implementation', () => {
       const createContext = {
         toolName: 'Write',
         input: { file_path: '/new.txt' },
-        operationType: 'create' as const
+        operationType: 'create' as const,
+        affectedFiles: ['/new.txt']
       }
-      expect(agent['formatToolOutput'](createContext, 'File created')).toBe('[✓] File created')
+      expect(agent['formatToolOutput'](createContext, 'File created')).toBe('[✓] File created (/new.txt)\nFile created')
       
       const deleteContext = {
         toolName: 'Delete',
         input: { file_path: '/old.txt' },
-        operationType: 'delete' as const
+        operationType: 'delete' as const,
+        affectedFiles: ['/old.txt']
       }
-      expect(agent['formatToolOutput'](deleteContext, 'File deleted')).toBe('[DEL] File deleted')
+      expect(agent['formatToolOutput'](deleteContext, 'File deleted')).toBe('[DEL] File deleted (/old.txt)\nFile deleted')
       
       const executeContext = {
         toolName: 'Bash',
         input: { command: 'ls' },
         operationType: 'execute' as const
       }
-      expect(agent['formatToolOutput'](executeContext, 'file1.txt file2.txt')).toBe('$ file1.txt file2.txt')
+      expect(agent['formatToolOutput'](executeContext, 'file1.txt file2.txt')).toBe('$ Command executed\nfile1.txt file2.txt')
     })
 
     it('should not duplicate existing indicators', () => {

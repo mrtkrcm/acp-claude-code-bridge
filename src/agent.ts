@@ -258,7 +258,13 @@ export class ClaudeACPAgent implements Agent {
       }
 
       // Handle permission mode switching
+      const previousPermissionMode = session.permissionMode;
       session.permissionMode = this.parsePromptPermissionMode(promptText, session.permissionMode);
+      
+      // Report bypass mode at first prompt or when mode changes
+      if (session.permissionMode === "bypassPermissions" && previousPermissionMode !== "bypassPermissions") {
+        await this.reportBypassMode(sessionId);
+      }
 
       // Prepare query options
       const queryOptions: Record<string, unknown> = {
@@ -805,20 +811,10 @@ export class ClaudeACPAgent implements Agent {
    * Enhances tool titles with status indicators
    */
   private enhanceToolTitle(sessionId: string, baseTitle: string, status: "pending" | "in_progress" | "completed" | "failed", operationType?: string): string {
-    const statusIndicators = {
-      pending: "[WAIT]",
-      in_progress: "[RUN]",
-      completed: "[OK]",
-      failed: "[FAIL]"
-    };
-    
     const session = this.getSession(sessionId);
     const indicators: string[] = [];
     
-    // Add status indicator (without redundant text)
-    indicators.push(statusIndicators[status]);
-    
-    // Add permission context only for non-ready events and non-readonly operations
+    // Add permission context only for non-readonly operations when not completed
     const isNonReadonly = this.isNonReadonlyOperation(operationType, baseTitle);
     if (status !== "completed" && isNonReadonly) {
       if (session.permissionMode === "bypassPermissions") {
@@ -828,10 +824,14 @@ export class ClaudeACPAgent implements Agent {
       }
     }
     
+    if (indicators.length === 0) {
+      return baseTitle; // No indicators to add
+    }
+    
     const indicatorString = indicators.join(" ");
     
     // Check if indicators already present
-    if (Object.values(statusIndicators).some(indicator => baseTitle.includes(indicator))) {
+    if (indicators.some(indicator => baseTitle.includes(indicator))) {
       return baseTitle; // Already enhanced
     }
     
@@ -866,6 +866,22 @@ export class ClaudeACPAgent implements Agent {
     
     // Default to non-readonly for safety (show bypass indicators when uncertain)
     return true;
+  }
+
+  /**
+   * Reports bypass mode activation to user
+   */
+  private async reportBypassMode(sessionId: string): Promise<void> {
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: "⏵⏵ bypass mode active - permissions will be bypassed for file operations"
+        }
+      }
+    });
   }
   
   /**
@@ -1065,22 +1081,29 @@ export class ClaudeACPAgent implements Agent {
    * Formats tool output with context-aware enhancements
    */
   private formatToolOutput(context: ToolOperationContext, output: string): string {
-    const { operationType } = context;
+    const { operationType, affectedFiles } = context;
+    
+    // Include file path context in output formatting
+    const fileContext = affectedFiles && affectedFiles.length > 0 
+      ? ` (${affectedFiles[0]}${affectedFiles.length > 1 ? ` +${affectedFiles.length - 1} files` : ''})`
+      : '';
     
     // Add visual indicators based on operation type
     switch (operationType) {
       case "create":
-        return output.startsWith('[✓]') ? output : `[✓] ${output}`;
+        return output.startsWith('[✓]') ? output : `[✓] File created${fileContext}\n${output}`;
       case "delete":
-        return output.startsWith('[DEL]') ? output : `[DEL] ${output}`;
+        return output.startsWith('[DEL]') ? output : `[DEL] File deleted${fileContext}\n${output}`;
       case "execute":
-        return output.startsWith('$') ? output : `$ ${output}`;
+        return output.startsWith('$') ? output : `$ Command executed\n${output}`;
       case "edit":
-        return output.startsWith('[EDIT]') ? output : `[EDIT] ${output}`;
+        return output.startsWith('[EDIT]') ? output : `[EDIT] File modified${fileContext}\n${output}`;
       case "search":
-        return output.startsWith('[SEARCH]') ? output : `[SEARCH] ${output}`;
+        return output.startsWith('[SEARCH]') ? output : `[SEARCH] Search completed\n${output}`;
+      case "read":
+        return output.startsWith('[READ]') ? output : `[READ] File read${fileContext}\n${output}`;
       default:
-        return output;
+        return fileContext ? `Operation on${fileContext}\n${output}` : output;
     }
   }
   
