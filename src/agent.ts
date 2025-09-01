@@ -90,7 +90,33 @@ export class ClaudeACPAgent implements Agent {
     this.contextMonitor = new ContextMonitor();
     this.claudeSDKCircuitBreaker = new CircuitBreaker(async (args) => query(args), CLAUDE_SDK_CIRCUIT_OPTIONS);
     
+    // Enhanced startup logging inspired by Gemini CLI
+    this.logStartupConfiguration();
     this.logger.info(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`);
+  }
+
+  /**
+   * Logs startup configuration for transparency (inspired by Gemini CLI)
+   */
+  private logStartupConfiguration(): void {
+    this.logger.info('=== ACP Bridge Startup Configuration ===');
+    this.logger.info(`Permission Mode: ${this.defaultPermissionMode} ${this.getPermissionModeSource()}`);
+    this.logger.info(`Max Turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns} ${this.getMaxTurnsSource()}`);
+    this.logger.info(`Debug Mode: ${process.env.ACP_DEBUG === 'true' ? 'enabled' : 'disabled'}`);
+    this.logger.info(`Log File: ${process.env.ACP_LOG_FILE || 'console only'}`);
+    this.logger.info(`Context Monitoring: active (200k token limit)`);
+    this.logger.info(`Circuit Breaker: enabled (Claude SDK protection)`);
+    this.logger.info('========================================');
+  }
+
+  private getPermissionModeSource(): string {
+    if (process.env.ACP_PERMISSION_MODE) return '(from ACP_PERMISSION_MODE)';
+    return '(default)';
+  }
+
+  private getMaxTurnsSource(): string {
+    if (process.env.ACP_MAX_TURNS) return '(from ACP_MAX_TURNS)';
+    return '(default)';
   }
 
   private validateConfig(): void {
