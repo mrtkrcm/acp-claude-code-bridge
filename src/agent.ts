@@ -15,7 +15,18 @@ import {
   CancelNotification,
   LoadSessionRequest,
 } from "@zed-industries/agent-client-protocol";
-import type { ClaudeMessage } from "./types.js";
+import type { 
+  ClaudeMessage, 
+  PlanEntry, 
+  ToolCallLocation, 
+  ToolCallContent,
+  PermissionOption,
+  ACPRequestPermissionRequest,
+  ACPContentBlock,
+  ACPAnnotations,
+  ToolOperationContext,
+  EnhancedPromptCapabilities
+} from "./types.js";
 import { validateNewSessionRequest, validateLoadSessionRequest, validatePromptRequest } from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
 import { createLogger, type Logger } from "./logger.js";
@@ -29,6 +40,13 @@ interface AgentSession {
   abortController: AbortController | null;
   claudeSessionId?: string;
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan";
+  // Enhanced ACP features
+  currentPlan?: PlanEntry[];
+  activeFiles?: Set<string>;
+  thoughtStreaming?: boolean;
+  createdAt: number;
+  lastActivityAt: number;
+  operationContext?: Map<string, ToolOperationContext>;
 }
 
 export class ClaudeACPAgent implements Agent {
@@ -39,6 +57,21 @@ export class ClaudeACPAgent implements Agent {
   private defaultPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   private pathToClaudeCodeExecutable: string | undefined;
   private claudeSDKCircuitBreaker: CircuitBreaker<{ prompt: string; options: Record<string, unknown> }, AsyncIterableIterator<SDKMessage>>;
+  
+  // Enhanced ACP capabilities
+  private readonly enhancedCapabilities: EnhancedPromptCapabilities = {
+    audio: false,
+    embeddedContext: true,
+    image: true,
+    plans: true,
+    thoughtStreaming: true
+  };
+  
+  // Performance constants
+  private static readonly PROMPT_COMPLEXITY_THRESHOLD = 200;
+  private static readonly MAX_ACTIVE_FILES_PER_SESSION = 100;
+  private static readonly PLAN_UPDATE_DEBOUNCE = 500; // ms
+  private static readonly THOUGHT_STREAM_ENABLED = true;
 
   constructor(private client: Client) {
     // Validate configuration
@@ -95,9 +128,9 @@ export class ClaudeACPAgent implements Agent {
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: {
-          image: true,
-          audio: false,
-          embeddedContext: true
+          image: this.enhancedCapabilities.image,
+          audio: this.enhancedCapabilities.audio,
+          embeddedContext: this.enhancedCapabilities.embeddedContext
         }
       },
     };
@@ -117,10 +150,17 @@ export class ClaudeACPAgent implements Agent {
       throw new Error('Maximum concurrent sessions reached');
     }
 
+    const now = Date.now();
     this.sessions.set(sessionId, {
       pendingPrompt: null,
       abortController: null,
       permissionMode: this.defaultPermissionMode,
+      // Enhanced session features
+      activeFiles: new Set(),
+      thoughtStreaming: ClaudeACPAgent.THOUGHT_STREAM_ENABLED,
+      createdAt: now,
+      lastActivityAt: now,
+      operationContext: new Map(),
     });
 
     this.logger.info(`Created session: ${sessionId}`);
@@ -205,12 +245,35 @@ export class ClaudeACPAgent implements Agent {
         queryOptions.maxTurns = this.maxTurns;
       }
 
-      // Send thinking indicator
+      // Analyze prompt complexity for enhanced features
+      const complexity = this.analyzePromptComplexity(promptText);
+      session.lastActivityAt = Date.now();
+      
+      // Send agent thought if thought streaming enabled and complex
+      if (session.thoughtStreaming && complexity.isComplex) {
+        await this.sendAgentThought(sessionId, `Analyzing request: ${complexity.summary}`);
+      }
+      
+      // Generate and send execution plan for complex operations
+      if (complexity.needsPlan) {
+        await this.generateAndSendPlan(sessionId, complexity);
+      }
+      
+      // Send thinking indicator with annotations
+      const thinkingAnnotations = this.generateContentAnnotations(
+        { toolName: "system", input: {}, operationType: "other" },
+        "Thinking"
+      );
+      
       await this.client.sessionUpdate({
         sessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "🤔 Thinking..." },
+          content: { 
+            type: "text", 
+            text: "Thinking...",
+            annotations: thinkingAnnotations.system ? thinkingAnnotations : undefined
+          },
         },
       });
       
@@ -298,8 +361,8 @@ export class ClaudeACPAgent implements Agent {
     const isCircuitBreaker = errorMessage.includes('Circuit breaker is OPEN');
     
     const text = isCircuitBreaker
-      ? `⏳ Service temporarily unavailable - retrying automatically`
-      : `❌ Error: ${errorMessage}`;
+      ? `[RETRY] Service temporarily unavailable - retrying automatically`
+      : `[ERROR] Error: ${errorMessage}`;
       
     await this.client.sessionUpdate({
       sessionId,
@@ -360,31 +423,57 @@ export class ClaudeACPAgent implements Agent {
   }
 
   private async handleToolUse(sessionId: string, content: { id?: string; name?: string; input?: Record<string, unknown> }): Promise<void> {
+    const toolName = content.name || "Tool";
+    const status = "pending";
+    
     await this.client.sessionUpdate({
       sessionId,
       update: {
         sessionUpdate: "tool_call",
         toolCallId: content.id || "",
-        title: content.name || "Tool",
-        kind: this.mapToolKind(content.name || ""),
-        status: "pending",
+        title: this.enhanceToolTitle(sessionId, toolName, status),
+        kind: this.mapToolKind(toolName),
+        status,
         rawInput: content.input as Record<string, unknown>,
       },
     });
   }
 
   private async handleToolStart(sessionId: string, msg: ClaudeMessage): Promise<void> {
-    const toolTitle = this.getToolTitle(msg.tool_name || "Tool", msg.input);
+    const toolName = msg.tool_name || "Tool";
+    const toolCallId = msg.id || "";
+    const session = this.getSession(sessionId);
+    
+    // Enhanced tool context analysis
+    const operationContext = this.analyzeToolOperation(toolName, msg.input);
+    session.operationContext?.set(toolCallId, operationContext);
+    
+    // Extract file locations for follow-along features
+    const locations = this.extractToolLocations(operationContext);
+    
+    // Track active files
+    if (session.activeFiles && session.activeFiles.size < ClaudeACPAgent.MAX_ACTIVE_FILES_PER_SESSION) {
+      locations.forEach(loc => session.activeFiles!.add(loc.path));
+    }
+    
+    // Enhanced tool title with context
+    const enhancedTitle = this.generateEnhancedToolTitle(operationContext);
+    
+    // Send agent thought for complex operations
+    if (session.thoughtStreaming && operationContext.complexity === "complex") {
+      await this.sendAgentThought(sessionId, `Starting ${operationContext.operationType} operation on ${operationContext.affectedFiles?.join(', ') || 'file'}`);
+    }
     
     await this.client.sessionUpdate({
       sessionId,
       update: {
         sessionUpdate: "tool_call",
-        toolCallId: msg.id || "",
-        title: toolTitle,
-        kind: this.mapToolKind(msg.tool_name || ""),
+        toolCallId,
+        title: this.enhanceToolTitle(sessionId, enhancedTitle, "pending"),
+        kind: this.mapToolKind(toolName),
         status: "pending",
         rawInput: msg.input as Record<string, unknown>,
+        locations,
       },
     });
 
@@ -398,7 +487,7 @@ export class ClaudeACPAgent implements Agent {
           status: "in_progress",
           content: [{
             type: "content",
-            content: { type: "text", text: `Executing ${toolTitle}...` }
+            content: { type: "text", text: `${this.enhanceToolTitle(sessionId, "Executing", "in_progress")} ${enhancedTitle}...` }
           }]
         },
       });
@@ -406,19 +495,39 @@ export class ClaudeACPAgent implements Agent {
   }
 
   private async handleToolOutput(sessionId: string, msg: ClaudeMessage): Promise<void> {
+    const toolCallId = msg.id || "";
+    const session = this.getSession(sessionId);
+    const operationContext = session.operationContext?.get(toolCallId);
+    
+    // Generate enhanced tool content with diff support
+    const enhancedContent = this.generateEnhancedToolContent(
+      operationContext || { toolName: "Tool", input: msg.input },
+      msg.output || ""
+    );
+    
+    // Send agent thought for completion
+    if (session.thoughtStreaming && operationContext?.complexity === "complex") {
+      await this.sendAgentThought(sessionId, `Completed ${operationContext.operationType} operation successfully`);
+    }
+    
+    // Update plan progress if operation was part of a plan
+    if (session.currentPlan && operationContext) {
+      await this.updatePlanForToolCompletion(sessionId, operationContext);
+    }
+    
     await this.client.sessionUpdate({
       sessionId,
       update: {
         sessionUpdate: "tool_call_update",
-        toolCallId: msg.id || "",
+        toolCallId,
         status: "completed",
-        content: [{
-          type: "content",
-          content: { type: "text", text: msg.output || "" },
-        }],
+        content: enhancedContent,
         rawOutput: msg.output ? { output: msg.output } : undefined,
       },
     });
+    
+    // Cleanup context
+    session.operationContext?.delete(toolCallId);
   }
 
   private async handleToolError(sessionId: string, msg: ClaudeMessage): Promise<void> {
@@ -430,7 +539,7 @@ export class ClaudeACPAgent implements Agent {
         status: "failed",
         content: [{
           type: "content",
-          content: { type: "text", text: `Error: ${msg.error}` },
+          content: { type: "text", text: `${this.enhanceToolTitle(sessionId, "Error", "failed")}: ${msg.error}` },
         }],
         rawOutput: { error: msg.error },
       },
@@ -507,12 +616,707 @@ export class ClaudeACPAgent implements Agent {
     }
   }
 
-  destroy(): void {
-    for (const session of this.sessions.values()) {
-      session.abortController?.abort();
+  // ============================================================================
+  // ENHANCED ACP FEATURE IMPLEMENTATIONS
+  // ============================================================================
+  
+  /**
+   * Analyzes prompt complexity for plan generation and thought streaming
+   */
+  private analyzePromptComplexity(prompt: string): {
+    isComplex: boolean;
+    needsPlan: boolean;
+    summary: string;
+    estimatedSteps: number;
+  } {
+    const lowerPrompt = prompt.toLowerCase();
+    
+    // Complex operation indicators
+    const complexKeywords = ['implement', 'create', 'build', 'refactor', 'restructure', 'migrate', 'optimize'];
+    const multiStepIndicators = ['first', 'then', 'next', 'after', 'finally', 'step', 'phase'];
+    
+    const hasComplexKeywords = complexKeywords.some(kw => lowerPrompt.includes(kw));
+    const hasMultiStepIndicators = multiStepIndicators.some(ind => lowerPrompt.includes(ind));
+    const isLongPrompt = prompt.length > ClaudeACPAgent.PROMPT_COMPLEXITY_THRESHOLD;
+    
+    const isComplex = hasComplexKeywords || hasMultiStepIndicators || isLongPrompt;
+    const needsPlan = isComplex && (hasMultiStepIndicators || isLongPrompt || complexKeywords.filter(kw => lowerPrompt.includes(kw)).length > 1);
+    
+    // Estimate steps based on complexity indicators
+    let estimatedSteps = 1;
+    if (hasMultiStepIndicators) estimatedSteps += 2;
+    if (hasComplexKeywords) estimatedSteps += 1;
+    if (isLongPrompt) estimatedSteps += 1;
+    
+    const summary = this.generatePromptSummary(prompt, isComplex);
+    
+    return { isComplex, needsPlan, summary, estimatedSteps };
+  }
+  
+  /**
+   * Generates a concise summary of the prompt
+   */
+  private generatePromptSummary(prompt: string, isComplex: boolean): string {
+    if (!isComplex) return "Processing simple request";
+    
+    const words = prompt.split(/\s+/);
+    if (words.length <= 15) return prompt;
+    
+    const firstSentence = prompt.split(/[.!?]/)[0];
+    return firstSentence.length <= 100 ? firstSentence : firstSentence.substring(0, 97) + '...';
+  }
+  
+  /**
+   * Generates and sends execution plan for complex operations
+   */
+  private async generateAndSendPlan(sessionId: string, complexity: { summary: string; estimatedSteps: number }): Promise<void> {
+    const session = this.getSession(sessionId);
+    const plan: PlanEntry[] = [];
+    
+    // Generate plan entries based on complexity
+    if (complexity.estimatedSteps >= 3) {
+      plan.push({
+        content: "Analyze requirements and approach",
+        priority: "high",
+        status: "in_progress"
+      });
+      plan.push({
+        content: "Execute main implementation",
+        priority: "high", 
+        status: "pending"
+      });
+      plan.push({
+        content: "Validate and finalize changes",
+        priority: "medium",
+        status: "pending"
+      });
+    } else {
+      plan.push({
+        content: complexity.summary,
+        priority: "high",
+        status: "in_progress"
+      });
     }
-    this.sessions.clear();
+    
+    session.currentPlan = plan;
+    await this.sendPlanUpdate(sessionId, plan);
+  }
+  
+  /**
+   * Sends plan update to client with mode indicators
+   */
+  private async sendPlanUpdate(sessionId: string, entries: PlanEntry[]): Promise<void> {
+    // Add mode indicators to the first entry title if entries exist
+    const enhancedEntries = entries.length > 0 ? [
+      {
+        ...entries[0],
+        title: this.addModeIndicators(sessionId, entries[0].title),
+      },
+      ...entries.slice(1)
+    ] : entries;
+
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "plan",
+        entries: enhancedEntries
+      }
+    });
+  }
+
+  /**
+   * Adds comprehensive mode indicators to title if not already present
+   */
+  private addModeIndicators(sessionId: string, title?: string): string {
+    const session = this.getSession(sessionId);
+    const indicators: string[] = [];
+    
+    // Always add plan mode indicator (we're in plan mode if this is called)
+    indicators.push("⏸ plan mode");
+    
+    // Permission mode indicators
+    if (session.permissionMode === "bypassPermissions") {
+      indicators.push("⏵⏵ bypass");
+    } else if (session.permissionMode === "acceptEdits") {
+      indicators.push("⏵⏵ accept");
+    }
+    
+    // Debug mode indicator
+    if (process.env.ACP_DEBUG === "true") {
+      indicators.push("[DEBUG] debug mode");
+    }
+    
+    // Session type indicator (loaded vs new)
+    if (session.claudeSessionId) {
+      indicators.push("[RESUME] resumed session");
+    }
+    
+    // Tool execution status (if tools are running)
+    if (session.operationContext && session.operationContext.size > 0) {
+      indicators.push("[TOOLS] tools active");
+    }
+    
+    // Max turns indicator (if limited)
+    if (this.maxTurns > 0) {
+      indicators.push(`[TURNS] max-turns:${this.maxTurns}`);
+    }
+    
+    const indicatorString = indicators.join(" ");
+    
+    if (!title) {
+      return indicatorString; // Return indicators without dash if no existing title
+    }
+    
+    // Check if any indicators are already present
+    if (indicators.some(indicator => title.includes(indicator.split(" ")[1] || indicator))) {
+      return title; // Already has indicators
+    }
+    
+    return `${indicatorString} - ${title}`;
+  }
+
+  /**
+   * Enhances tool titles with status indicators
+   */
+  private enhanceToolTitle(sessionId: string, baseTitle: string, status: "pending" | "in_progress" | "completed" | "failed"): string {
+    const statusIndicators = {
+      pending: "[PEND]",
+      in_progress: "[RUN]",
+      completed: "[OK]",
+      failed: "[FAIL]"
+    };
+    
+    const session = this.getSession(sessionId);
+    const indicators: string[] = [];
+    
+    // Add status indicator
+    indicators.push(`${statusIndicators[status]} ${status}`);
+    
+    // Add permission context if relevant
+    if (session.permissionMode === "bypassPermissions") {
+      indicators.push("⏵⏵ bypass");
+    } else if (session.permissionMode === "acceptEdits") {
+      indicators.push("⏵⏵ accept");
+    }
+    
+    const indicatorString = indicators.join(" ");
+    
+    // Check if indicators already present
+    if (Object.values(statusIndicators).some(indicator => baseTitle.includes(indicator))) {
+      return baseTitle; // Already enhanced
+    }
+    
+    return `${indicatorString} - ${baseTitle}`;
+  }
+  
+  /**
+   * Sends agent thought chunk for transparency
+   */
+  private async sendAgentThought(sessionId: string, thought: string): Promise<void> {
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: thought }
+      }
+    });
+  }
+  
+  /**
+   * Analyzes tool operation for enhanced context
+   */
+  private analyzeToolOperation(toolName: string, input: unknown): ToolOperationContext {
+    const inputObj = this.isValidInput(input) ? input : {};
+    const lowerName = toolName.toLowerCase();
+    
+    // Determine operation type
+    let operationType: ToolOperationContext['operationType'] = "other";
+    if (lowerName.includes('read') || lowerName.includes('view') || lowerName.includes('cat')) operationType = "read";
+    else if (lowerName.includes('write') || lowerName.includes('create')) operationType = "create";
+    else if (lowerName.includes('edit') || lowerName.includes('modify')) operationType = "edit";
+    else if (lowerName.includes('delete') || lowerName.includes('remove')) operationType = "delete";
+    else if (lowerName.includes('move') || lowerName.includes('rename')) operationType = "move";
+    else if (lowerName.includes('search') || lowerName.includes('grep') || lowerName.includes('find')) operationType = "search";
+    else if (lowerName.includes('execute') || lowerName.includes('bash') || lowerName.includes('run')) operationType = "execute";
+    
+    // Extract affected files
+    const affectedFiles: string[] = [];
+    if (inputObj.file_path) affectedFiles.push(String(inputObj.file_path));
+    if (Array.isArray(inputObj.files)) {
+      affectedFiles.push(...inputObj.files.map(f => typeof f === 'string' ? f : String(f.path || f)));
+    }
+    
+    // Determine complexity
+    let complexity: ToolOperationContext['complexity'] = "simple";
+    if (affectedFiles.length > 3) complexity = "complex";
+    else if (operationType === "execute" || operationType === "delete") complexity = "moderate";
+    else if (affectedFiles.length > 1) complexity = "moderate";
+    
+    return {
+      toolName,
+      input,
+      operationType,
+      affectedFiles: affectedFiles.length > 0 ? affectedFiles : undefined,
+      complexity
+    };
+  }
+  
+  /**
+   * Type guard for valid input objects
+   */
+  private isValidInput(input: unknown): input is Record<string, unknown> {
+    return input !== null && typeof input === 'object' && !Array.isArray(input);
+  }
+  
+  /**
+   * Extracts file locations from tool operation context
+   */
+  private extractToolLocations(context: ToolOperationContext): ToolCallLocation[] {
+    const locations: ToolCallLocation[] = [];
+    
+    if (context.affectedFiles) {
+      for (const filePath of context.affectedFiles) {
+        const location: ToolCallLocation = { path: filePath };
+        
+        // Try to extract line number from input
+        if (this.isValidInput(context.input)) {
+          const inputObj = context.input;
+          if (typeof inputObj.line === 'number') location.line = inputObj.line;
+          else if (typeof inputObj.offset === 'number') location.line = inputObj.offset;
+        }
+        
+        locations.push(location);
+      }
+    }
+    
+    return locations;
+  }
+  
+  /**
+   * Generates enhanced tool title with context
+   */
+  private generateEnhancedToolTitle(context: ToolOperationContext): string {
+    const { operationType, affectedFiles, toolName } = context;
+    
+    if (affectedFiles && affectedFiles.length > 0) {
+      const fileName = affectedFiles[0].split('/').pop() || affectedFiles[0];
+      const action = operationType ? operationType.charAt(0).toUpperCase() + operationType.slice(1) : toolName;
+      
+      if (affectedFiles.length === 1) {
+        return `${action}: ${fileName}`;
+      } else {
+        return `${action}: ${fileName} (+${affectedFiles.length - 1} files)`;
+      }
+    }
+    
+    // Enhanced titles for non-file operations
+    if (this.isValidInput(context.input)) {
+      const inputObj = context.input;
+      
+      if (inputObj.command) {
+        const cmd = String(inputObj.command);
+        const shortCmd = cmd.length > 30 ? cmd.substring(0, 27) + '...' : cmd;
+        return `Execute: ${shortCmd}`;
+      }
+      
+      if (inputObj.pattern || inputObj.query) {
+        const term = String(inputObj.pattern || inputObj.query);
+        const shortTerm = term.length > 25 ? term.substring(0, 22) + '...' : term;
+        return `Search: "${shortTerm}"`;
+      }
+      
+      if (inputObj.url) {
+        const url = String(inputObj.url);
+        try {
+          const domain = new URL(url).hostname;
+          return `Fetch: ${domain}`;
+        } catch {
+          return `Fetch: ${url.substring(0, 30)}...`;
+        }
+      }
+    }
+    
+    return toolName;
+  }
+  
+  /**
+   * Generates enhanced tool content with diff support
+   */
+  private generateEnhancedToolContent(context: ToolOperationContext, output: string): ToolCallContent[] {
+    const { operationType, affectedFiles } = context;
+    
+    // Generate diff content for file operations
+    if ((operationType === "edit" || operationType === "create") && 
+        affectedFiles && affectedFiles.length === 1 &&
+        this.isValidInput(context.input)) {
+      
+      const inputObj = context.input;
+      const filePath = affectedFiles[0];
+      
+      // Check for edit operations with old/new content
+      if (inputObj.old_string && inputObj.new_string) {
+        return [{
+          type: "diff",
+          path: filePath,
+          oldText: String(inputObj.old_string),
+          newText: String(inputObj.new_string)
+        }];
+      }
+      
+      // Check for file creation
+      if (operationType === "create" && inputObj.content) {
+        return [{
+          type: "diff",
+          path: filePath,
+          oldText: null,
+          newText: String(inputObj.content)
+        }];
+      }
+    }
+    
+    // Enhanced text content with formatting and annotations
+    const formattedOutput = this.formatToolOutput(context, output);
+    const annotations = this.generateContentAnnotations(context, output);
+    
+    return [{
+      type: "content",
+      content: { 
+        type: "text", 
+        text: formattedOutput,
+        annotations: annotations.text ? annotations : undefined
+      }
+    }];
+  }
+  
+  /**
+   * Formats tool output with context-aware enhancements
+   */
+  private formatToolOutput(context: ToolOperationContext, output: string): string {
+    const { operationType } = context;
+    
+    // Add visual indicators based on operation type
+    switch (operationType) {
+      case "create":
+        return output.startsWith('[✓]') ? output : `[✓] ${output}`;
+      case "delete":
+        return output.startsWith('[DEL]') ? output : `[DEL] ${output}`;
+      case "execute":
+        return output.startsWith('$') ? output : `$ ${output}`;
+      case "edit":
+        return output.startsWith('[EDIT]') ? output : `[EDIT] ${output}`;
+      case "search":
+        return output.startsWith('[SEARCH]') ? output : `[SEARCH] ${output}`;
+      default:
+        return output;
+    }
+  }
+  
+  /**
+   * Updates plan progress when tools complete
+   */
+  private async updatePlanForToolCompletion(sessionId: string, _context: ToolOperationContext): Promise<void> {
+    const session = this.getSession(sessionId);
+    if (!session.currentPlan) return;
+    
+    // Find and update relevant plan entries
+    let updated = false;
+    for (let i = 0; i < session.currentPlan.length; i++) {
+      const entry = session.currentPlan[i];
+      if (entry.status === "in_progress") {
+        entry.status = "completed";
+        updated = true;
+        
+        // Mark next entry as in progress
+        if (i + 1 < session.currentPlan.length && session.currentPlan[i + 1].status === "pending") {
+          session.currentPlan[i + 1].status = "in_progress";
+        }
+        break;
+      }
+    }
+    
+    if (updated) {
+      // Debounce plan updates to avoid spam
+      setTimeout(async () => {
+        if (session.currentPlan) {
+          await this.sendPlanUpdate(sessionId, session.currentPlan);
+        }
+      }, ClaudeACPAgent.PLAN_UPDATE_DEBOUNCE);
+    }
+  }
+  
+  /**
+   * Enhanced permission request with full ACP integration
+   */
+  private async requestEnhancedPermission(
+    sessionId: string,
+    toolCallId: string, 
+    context: ToolOperationContext
+  ): Promise<boolean> {
+    const session = this.getSession(sessionId);
+    const mode = session.permissionMode || this.defaultPermissionMode;
+    
+    // Quick decisions for simple modes
+    if (mode === 'bypassPermissions') return true;
+    if (mode === 'acceptEdits' && this.isAutoApprovableOperation(context)) return true;
+    
+    // Use ACP permission request for complex decisions
+    if (this.requiresExplicitPermission(context)) {
+      try {
+        const permissionRequest: ACPRequestPermissionRequest = {
+          sessionId,
+          toolCall: {
+            toolCallId,
+            title: this.generateEnhancedToolTitle(context),
+            kind: this.mapToolKind(context.toolName),
+            status: "pending",
+            rawInput: this.isValidInput(context.input) ? context.input : undefined,
+            locations: this.extractToolLocations(context)
+          },
+          options: this.generatePermissionOptions(context)
+        };
+        
+        const response = await this.client.requestPermission(permissionRequest);
+        
+        if (response.outcome.outcome === 'cancelled') return false;
+        if (response.outcome.outcome === 'selected') {
+          const outcome = response.outcome as { outcome: 'selected'; optionId: string };
+          const selectedOption = permissionRequest.options.find(opt => opt.optionId === outcome.optionId);
+          return selectedOption?.kind === 'allow_once' || selectedOption?.kind === 'allow_always';
+        }
+        
+        return false;
+      } catch (error) {
+        this.logger.error(`Permission request failed: ${error}`, { sessionId, toolName: context.toolName });
+        return mode === 'acceptEdits' && this.isAutoApprovableOperation(context);
+      }
+    }
+    
+    return true;
+  }
+  
+  /**
+   * Checks if operation is auto-approvable in acceptEdits mode
+   */
+  private isAutoApprovableOperation(context: ToolOperationContext): boolean {
+    const readOnlyOperations = new Set(['read', 'search']);
+    return readOnlyOperations.has(context.operationType || 'other');
+  }
+  
+  /**
+   * Determines if operation requires explicit permission
+   */
+  private requiresExplicitPermission(context: ToolOperationContext): boolean {
+    const { operationType, affectedFiles } = context;
+    
+    // Always require permission for destructive operations
+    if (operationType === 'delete') return true;
+    
+    // Require permission for system commands
+    if (operationType === 'execute' && this.isValidInput(context.input)) {
+      const inputObj = context.input;
+      const command = String(inputObj.command || '');
+      const dangerousCommands = ['rm', 'sudo', 'chmod', 'chown', 'mv', 'cp', 'dd'];
+      if (dangerousCommands.some(cmd => command.includes(cmd))) return true;
+    }
+    
+    // Require permission for operations outside current directory
+    if (affectedFiles) {
+      const cwd = process.cwd();
+      const hasExternalFiles = affectedFiles.some(path => {
+        return path.startsWith('/') && !path.startsWith(cwd);
+      });
+      if (hasExternalFiles) return true;
+    }
+    
+    return false;
+  }
+  
+  /**
+   * Generates permission options for tool operations
+   */
+  private generatePermissionOptions(context: ToolOperationContext): PermissionOption[] {
+    const { operationType } = context;
+    
+    const options: PermissionOption[] = [
+      {
+        optionId: 'allow_once',
+        name: 'Allow this time',
+        kind: 'allow_once'
+      },
+      {
+        optionId: 'reject_once', 
+        name: 'Deny this time',
+        kind: 'reject_once'
+      }
+    ];
+    
+    // Add "always" options for non-destructive operations
+    if (operationType !== 'delete') {
+      options.push({
+        optionId: 'allow_always',
+        name: 'Always allow this type of operation',
+        kind: 'allow_always'
+      });
+    }
+    
+    options.push({
+      optionId: 'reject_always',
+      name: 'Never allow this type of operation',
+      kind: 'reject_always'
+    });
+    
+    return options;
+  }
+  
+  /**
+   * Generates content annotations for enhanced metadata
+   */
+  private generateContentAnnotations(
+    context: ToolOperationContext, 
+    _output: string
+  ): ACPAnnotations & { text?: boolean; system?: boolean } {
+    const annotations: ACPAnnotations & { text?: boolean; system?: boolean } = {};
+    
+    // Add audience annotation
+    if (context.operationType === "execute" || context.operationType === "delete") {
+      annotations.audience = ["user"]; // User should see dangerous operations
+    } else {
+      annotations.audience = ["assistant"]; // Assistant-focused content
+    }
+    
+    // Add priority based on operation complexity
+    switch (context.complexity) {
+      case "complex":
+        annotations.priority = 3;
+        break;
+      case "moderate":
+        annotations.priority = 2;
+        break;
+      default:
+        annotations.priority = 1;
+    }
+    
+    // Add timestamp for file operations
+    if (context.affectedFiles && context.affectedFiles.length > 0) {
+      annotations.lastModified = new Date().toISOString();
+      annotations.text = true;
+    }
+    
+    // Special annotation for system messages
+    if (context.toolName === "system") {
+      annotations.system = true;
+    }
+    
+    return annotations;
+  }
+  
+  /**
+   * Enhanced content block support for rich media
+   */
+  private async sendRichContent(
+    sessionId: string,
+    content: ACPContentBlock,
+    updateType: "agent_message_chunk" | "agent_thought_chunk" = "agent_message_chunk"
+  ): Promise<void> {
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: updateType,
+        content
+      }
+    });
+  }
+  
+  /**
+   * Creates resource content block for embedded context
+   */
+  private createResourceContent(uri: string, name: string, description?: string): ACPContentBlock {
+    return {
+      type: "resource_link",
+      uri,
+      name,
+      description,
+      annotations: {
+        audience: ["user"],
+        priority: 2
+      }
+    };
+  }
+  
+  /**
+   * Enhanced session status with ACP feature metrics
+   */
+  private getSessionStatus(sessionId: string): {
+    active: boolean;
+    features: {
+      planActive: boolean;
+      thoughtStreaming: boolean;
+      activeFiles: number;
+      complexity: string;
+    };
+  } {
+    const session = this.sessions.get(sessionId);
+    
+    if (!session) {
+      return {
+        active: false,
+        features: {
+          planActive: false,
+          thoughtStreaming: false,
+          activeFiles: 0,
+          complexity: "none"
+        }
+      };
+    }
+    
+    const activeContexts = Array.from(session.operationContext?.values() || []);
+    const avgComplexity = activeContexts.length > 0 
+      ? activeContexts.reduce((acc, ctx) => {
+          const complexity = ctx.complexity === "complex" ? 3 : ctx.complexity === "moderate" ? 2 : 1;
+          return acc + complexity;
+        }, 0) / activeContexts.length
+      : 0;
+    
+    let complexityLevel = "low";
+    if (avgComplexity >= 2.5) complexityLevel = "high";
+    else if (avgComplexity >= 1.5) complexityLevel = "moderate";
+    
+    return {
+      active: true,
+      features: {
+        planActive: !!session.currentPlan && session.currentPlan.length > 0,
+        thoughtStreaming: !!session.thoughtStreaming,
+        activeFiles: session.activeFiles?.size || 0,
+        complexity: complexityLevel
+      }
+    };
+  }
+  
+  /**
+   * Enhanced session cleanup with ACP feature cleanup
+   */
+  private cleanupSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.abortController?.abort();
+      session.activeFiles?.clear();
+      session.operationContext?.clear();
+      session.currentPlan = undefined;
+    }
+    
+    this.sessions.delete(sessionId);
+    globalResourceManager.removeSession(sessionId);
+    
+    this.logger.debug(`Cleaned up session: ${sessionId}`);
+  }
+  
+  destroy(): void {
+    // Clean up all sessions with enhanced cleanup
+    for (const [sessionId] of this.sessions.entries()) {
+      this.cleanupSession(sessionId);
+    }
+    
     this.contextMonitor.destroy();
-    this.logger.info('ACP Agent destroyed');
+    this.logger.info('Enhanced ACP Agent destroyed');
   }
 }

@@ -6,17 +6,71 @@ import type {
   PlanEntry as ACPPlanEntry, 
   ToolCallLocation as ACPToolCallLocation,
   ToolCallContent as ACPToolCallContent,
-  PermissionOption as ACPPermissionOption
+  PermissionOption as ACPPermissionOption,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  Annotations,
+  ContentBlock,
+  EmbeddedResourceResource
 } from "@zed-industries/agent-client-protocol";
 
 // Re-export with local names for convenience
-export type PlanEntry = ACPPlanEntry;
+// Enhanced PlanEntry with optional title field for better UX
+export interface PlanEntry extends ACPPlanEntry {
+  title?: string;
+}
 export type ToolCallLocation = ACPToolCallLocation;
 export type ToolCallContent = ACPToolCallContent;
 export type PermissionOption = ACPPermissionOption;
+export type ACPRequestPermissionRequest = RequestPermissionRequest;
+export type ACPRequestPermissionResponse = RequestPermissionResponse;
+export type ACPAnnotations = Annotations;
+export type ACPContentBlock = ContentBlock;
+export type ACPEmbeddedResource = EmbeddedResourceResource;
 
-// Manual type definition since it's not exported
+// Extended types for enhanced ACP features
 export type PermissionOptionKind = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+
+// Enhanced tool content with diff support
+export interface EnhancedToolContent {
+  type: "content" | "diff" | "resource";
+  content?: ACPContentBlock;
+  path?: string;
+  oldText?: string | null;
+  newText?: string;
+  resource?: ACPEmbeddedResource;
+}
+
+// Plan entry status type
+export type PlanStatus = "pending" | "in_progress" | "completed" | "failed";
+export type PlanPriority = "high" | "medium" | "low";
+
+// Session update types
+export type SessionUpdateType = 
+  | "agent_message_chunk"
+  | "agent_thought_chunk" 
+  | "user_message_chunk"
+  | "tool_call"
+  | "tool_call_update"
+  | "plan";
+
+// Enhanced session capabilities
+export interface EnhancedPromptCapabilities {
+  audio: boolean;
+  embeddedContext: boolean;
+  image: boolean;
+  plans: boolean;
+  thoughtStreaming: boolean;
+}
+
+// Tool operation context for enhanced titles and content
+export interface ToolOperationContext {
+  toolName: string;
+  input: unknown;
+  operationType?: "create" | "read" | "edit" | "delete" | "move" | "search" | "execute" | "other";
+  affectedFiles?: string[];
+  complexity?: "simple" | "moderate" | "complex";
+}
 
 // Import Zod for runtime validation
 import { z } from 'zod';

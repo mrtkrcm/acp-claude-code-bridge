@@ -1,3 +1,24 @@
+## [0.16.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.15.0...v0.16.0) (2025-09-01)
+
+### Features
+
+* **indicators**: implement comprehensive Unicode mode indicators for enhanced UX
+  - Add `⏸ plan mode` indicator for planning phases
+  - Add `⏵⏵ bypass` indicator for bypass permission mode
+  - Add `⏵⏵ accept` indicator for auto-accept edit mode
+  - Maintain ASCII indicators for tool status and other states
+  - Complete bidirectional compatibility between Claude Code and ACP protocols
+
+* **ui**: enhance visual feedback system with hybrid Unicode/ASCII approach
+  - Plan entries now display clear mode context in titles
+  - Tool execution shows permission context alongside status
+  - Comprehensive coverage of all Claude Code and ACP specification modes
+
+### Code Quality
+
+* **cleanup**: remove unused imports and resolve all linting warnings
+* **types**: optimize type imports for better maintainability
+
 ## [0.11.0](https://github.com/mrtkrcm/acp-claude-code-bridge/compare/v0.10.0...v0.11.0) (2024-08-31)
 
 ### Features
