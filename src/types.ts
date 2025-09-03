@@ -1,9 +1,9 @@
-// Re-export all types from the agent-client-protocol
-export * from "@zed-industries/agent-client-protocol";
+// Re-export all types from our enhanced schema
+export * from "./schema.js";
 
 // Import specific types for local use
-import type { 
-  PlanEntry as ACPPlanEntry, 
+import type {
+  PlanEntry as ACPPlanEntry,
   ToolCallLocation as ACPToolCallLocation,
   ToolCallContent as ACPToolCallContent,
   PermissionOption as ACPPermissionOption,
@@ -12,7 +12,7 @@ import type {
   Annotations,
   ContentBlock,
   EmbeddedResourceResource
-} from "@zed-industries/agent-client-protocol";
+} from "./schema.js";
 
 // Re-export with local names for convenience
 // Enhanced PlanEntry with optional title field for better UX
@@ -74,9 +74,6 @@ export interface ToolOperationContext {
 
 // Import Zod for runtime validation
 import { z } from 'zod';
-
-// Import ACP types for validation
-import type { NewSessionRequest, LoadSessionRequest, PromptRequest } from "@zed-industries/agent-client-protocol";
 
 // Claude Code SDK message types
 export interface ClaudeMessage {
@@ -179,26 +176,7 @@ export const PromptRequestSchema = z.object({
   })).min(1),
 });
 
-// Validation helper functions using Zod schemas
-
-export function validateSessionId(sessionId: unknown): string {
-  return SessionIdSchema.parse(sessionId);
-}
-
-export function validateNewSessionRequest(data: unknown): NewSessionRequest {
-  const validated = NewSessionRequestSchema.parse(data);
-  return validated as NewSessionRequest;
-}
-
-export function validateLoadSessionRequest(data: unknown): LoadSessionRequest {
-  const validated = LoadSessionRequestSchema.parse(data);
-  return validated as LoadSessionRequest;
-}
-
-export function validatePromptRequest(data: unknown): PromptRequest {
-  const validated = PromptRequestSchema.parse(data);
-  return validated as PromptRequest;
-}
+// Validation is now handled by Zod schemas in the protocol layer
 
 // Essential MIME type mappings
 export const MIME_TYPE_MAPPINGS: Record<string, string> = {

@@ -1,9 +1,9 @@
-import { AgentSideConnection } from "@zed-industries/agent-client-protocol";
 import { Writable, Readable } from "node:stream";
 import { WritableStream, ReadableStream } from "node:stream/web";
 import { ClaudeACPAgent } from "./agent.js";
 import { DiagnosticSystem } from "./diagnostics.js";
 import { createLogger } from "./logger.js";
+import { AgentSideConnection } from "./protocol.js";
 
 export async function main() {
   // Check for diagnostic mode FIRST - before any setup
@@ -80,6 +80,9 @@ export async function main() {
       },
       outputStream, // WritableStream for sending data to client (stdout)
       inputStream, // ReadableStream for receiving data from client (stdin)
+      {
+        fileSystemEnabled: true, // Enable direct file system operations
+      }
     );
 
     // Log connection creation success

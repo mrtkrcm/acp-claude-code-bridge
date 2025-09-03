@@ -409,7 +409,7 @@ describe('Enhanced ACP Features - Complete Implementation', () => {
       }
       const createResult = agent['formatToolOutput'](createContext, 'File created')
       expect(createResult).toContain('[CREATE]')
-      expect(createResult).toContain('/new.txt')  
+      expect(createResult).toContain('/new.txt')
       expect(createResult).toContain('File created')
       
       const deleteContext = {

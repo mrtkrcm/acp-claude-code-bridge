@@ -1,24 +1,24 @@
 import { query } from "@anthropic-ai/claude-code";
 import type { SDKMessage } from "@anthropic-ai/claude-code";
 import { randomUUID } from 'crypto';
+import type { Agent, Client } from "./protocol.js";
+import * as schema from "./schema.js";
 import {
-  Agent,
-  Client,
   PROTOCOL_VERSION,
-  InitializeRequest,
-  InitializeResponse,
-  NewSessionRequest,
-  NewSessionResponse,
-  AuthenticateRequest,
-  PromptRequest,
-  PromptResponse,
-  CancelNotification,
-  LoadSessionRequest,
-} from "@zed-industries/agent-client-protocol";
-import type { 
-  ClaudeMessage, 
-  PlanEntry, 
-  ToolCallLocation, 
+  type InitializeRequest,
+  type InitializeResponse,
+  type NewSessionRequest,
+  type NewSessionResponse,
+  type AuthenticateRequest,
+  type PromptRequest,
+  type PromptResponse,
+  type CancelNotification,
+  type LoadSessionRequest,
+} from "./schema.js";
+import type {
+  ClaudeMessage,
+  PlanEntry,
+  ToolCallLocation,
   ToolCallContent,
   PermissionOption,
   ACPRequestPermissionRequest,
@@ -27,7 +27,6 @@ import type {
   ToolOperationContext,
   EnhancedPromptCapabilities
 } from "./types.js";
-import { validateNewSessionRequest, validateLoadSessionRequest, validatePromptRequest } from "./types.js";
 import { ContextMonitor } from "./context-monitor.js";
 import { createLogger, type Logger } from "./logger.js";
 import { CircuitBreaker, CLAUDE_SDK_CIRCUIT_OPTIONS } from './circuit-breaker.js';
@@ -47,6 +46,8 @@ interface AgentSession {
   createdAt: number;
   lastActivityAt: number;
   operationContext?: Map<string, ToolOperationContext>;
+  // MCP server support
+  mcpServers?: schema.McpServer[];
 }
 
 export class ClaudeACPAgent implements Agent {
@@ -148,7 +149,16 @@ export class ClaudeACPAgent implements Agent {
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.logger.debug(`Initialize with protocol version: ${params.protocolVersion}`);
-    
+
+    // Determine available authentication methods
+    const authMethods: schema.AuthMethod[] = [
+      {
+        id: 'claude-code',
+        name: 'Claude Code',
+        description: 'Authentication via Claude Code SDK',
+      }
+    ];
+
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -159,12 +169,12 @@ export class ClaudeACPAgent implements Agent {
           embeddedContext: this.enhancedCapabilities.embeddedContext
         }
       },
+      authMethods,
     };
   }
 
   async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
-    const validatedParams = validateNewSessionRequest(_params);
-    this.logger.info("Creating new session", { cwd: validatedParams.cwd });
+    this.logger.info("Creating new session", { cwd: _params.cwd });
     
     if (!globalResourceManager.canStartOperation('new-session')) {
       handleResourceError('System resources exhausted - cannot create new session', { operation: 'newSession' });
@@ -187,32 +197,39 @@ export class ClaudeACPAgent implements Agent {
       createdAt: now,
       lastActivityAt: now,
       operationContext: new Map(),
+      // MCP server support
+      mcpServers: _params.mcpServers,
     });
 
     this.logger.info(`Created session: ${sessionId}`);
     return { sessionId };
   }
 
-  async loadSession?(params: LoadSessionRequest): Promise<void> {
-    const validatedParams = validateLoadSessionRequest(params);
-    this.logger.info(`Loading session: ${validatedParams.sessionId}`);
+  async loadSession?(params: LoadSessionRequest): Promise<null> {
+    this.logger.info(`Loading session: ${params.sessionId}`);
 
     // ACP doesn't support session persistence - sessions are memory-only
-    if (this.sessions.has(validatedParams.sessionId)) {
-      this.logger.debug(`Session ${validatedParams.sessionId} already exists in memory`);
-      return;
+    if (this.sessions.has(params.sessionId)) {
+      this.logger.debug(`Session ${params.sessionId} already exists in memory`);
+      return null;
     }
 
-    this.logger.debug(`Session ${validatedParams.sessionId} not found - ACP sessions are memory-only`);
+    // Log MCP server configuration for transparency
+    if (params.mcpServers && params.mcpServers.length > 0) {
+      this.logger.info(`MCP servers configured: ${params.mcpServers.map(s => s.name).join(', ')}`);
+    }
+
+    this.logger.debug(`Session ${params.sessionId} not found - ACP sessions are memory-only`);
+    return null;
   }
 
-  async authenticate(_params: AuthenticateRequest): Promise<void> {
+  async authenticate(_params: AuthenticateRequest): Promise<null> {
     this.logger.debug("Authentication handled by Claude Code SDK");
+    return null;
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const validatedParams = validatePromptRequest(params);
-    const sessionId = validatedParams.sessionId;
+    const sessionId = params.sessionId;
     
     return withPerformanceTracking('prompt', async () => {
       const session = this.getSession(sessionId);
@@ -235,7 +252,7 @@ export class ClaudeACPAgent implements Agent {
       }
       
       try {
-        return await this.executePrompt(validatedParams, session, sessionId);
+        return await this.executePrompt(params, session, sessionId);
       } finally {
         globalResourceManager.finishOperation(operationId);
       }
@@ -538,7 +555,6 @@ export class ClaudeACPAgent implements Agent {
         toolCallId,
         status: "completed",
         content: enhancedContent,
-        rawOutput: msg.output ? { output: msg.output } : undefined,
       },
     });
     
@@ -557,7 +573,6 @@ export class ClaudeACPAgent implements Agent {
           type: "content",
           content: { type: "text", text: `${this.enhanceToolTitle(sessionId, "Error", "failed")}: ${msg.error}` },
         }],
-        rawOutput: { error: msg.error },
       },
     });
   }
@@ -581,37 +596,54 @@ export class ClaudeACPAgent implements Agent {
 
   private mapToolKind(toolName: string): "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "other" {
     const lowerName = toolName.toLowerCase();
-    
+
+    // Exact tool name matches first (highest priority)
+    switch (toolName) {
+      case 'Agent': return 'think';
+      case 'BashOutput': return 'execute';
+      case 'ExitPlanMode': return 'think';
+      case 'Glob': return 'read';
+      case 'KillShell': return 'execute';
+      case 'NotebookEdit': return 'edit';
+      case 'TodoWrite': return 'think';
+      case 'WebSearch': return 'search';
+      case 'ListMcpResources': return 'read';
+      case 'ReadMcpResource': return 'read';
+      case 'McpInput': return 'other';
+    }
+
+    // Pattern-based matching (fallback)
     // Read operations
-    if (lowerName.includes("read") || lowerName.includes("glob") || lowerName.includes("ls") || 
-        lowerName.includes("cat") || lowerName.includes("view")) return "read";
-    
+    if (lowerName.includes("read") || lowerName.includes("glob") || lowerName.includes("ls") ||
+      lowerName.includes("cat") || lowerName.includes("view") || lowerName.includes("list")) return "read";
+
     // Edit operations
     if (lowerName.includes("write") || lowerName.includes("edit") || lowerName.includes("create") ||
-        lowerName.includes("update") || lowerName.includes("modify")) return "edit";
-    
+      lowerName.includes("update") || lowerName.includes("modify") || lowerName.includes("notebook")) return "edit";
+
     // Delete operations
-    if (lowerName.includes("delete") || lowerName.includes("remove") || lowerName.includes("rm")) return "delete";
-    
+    if (lowerName.includes("delete") || lowerName.includes("remove") || lowerName.includes("rm") ||
+      lowerName.includes("kill")) return "delete";
+
     // Move operations
     if (lowerName.includes("move") || lowerName.includes("mv") || lowerName.includes("rename")) return "move";
-    
+
     // Search operations
     if (lowerName.includes("grep") || lowerName.includes("search") || lowerName.includes("find") ||
         lowerName.includes("rg") || lowerName.includes("ripgrep")) return "search";
-    
+
     // Execute operations
     if (lowerName.includes("bash") || lowerName.includes("execute") || lowerName.includes("run") ||
         lowerName.includes("command") || lowerName.includes("shell")) return "execute";
-    
+
     // Think operations
     if (lowerName.includes("todo") || lowerName.includes("plan") || lowerName.includes("think") ||
-        lowerName.includes("analyze")) return "think";
-    
+      lowerName.includes("analyze") || lowerName.includes("exit")) return "think";
+
     // Fetch operations
     if (lowerName.includes("fetch") || lowerName.includes("web") || lowerName.includes("http") ||
-        lowerName.includes("download")) return "fetch";
-    
+      lowerName.includes("download") || lowerName.includes("mcp")) return "fetch";
+
     return "other";
   }
 
@@ -789,8 +821,7 @@ export class ClaudeACPAgent implements Agent {
   /**
    * Enhances tool titles with status indicators
    */
-  private enhanceToolTitle(sessionId: string, baseTitle: string, status: "pending" | "in_progress" | "completed" | "failed", operationType?: string): string {
-    const session = this.getSession(sessionId);
+  private enhanceToolTitle(sessionId: string, baseTitle: string, _status: "pending" | "in_progress" | "completed" | "failed", _operationType?: string): string {
     const indicators: string[] = [];
     
     // Permission indicators removed - only shown at session start
@@ -1076,81 +1107,164 @@ export class ClaudeACPAgent implements Agent {
     const filePath = affectedFiles && affectedFiles[0] ? affectedFiles[0] : '';
     const multipleFiles = affectedFiles && affectedFiles.length > 1 ? ` (+${affectedFiles.length - 1} files)` : '';
     
-    // Simple, clean formatting focused on file names and content
+    // Rich formatting focused on file names and content with visual indicators
     switch (operationType) {
-      case "create":
+      case "create": {
         if (output.startsWith('[CREATE]') || output.startsWith('[✓]')) return output;
         const createIcon = this.getFileTypeIcon(filePath);
         return `[CREATE] ${createIcon} ${filePath}${multipleFiles}\n${output}`;
-        
-      case "delete":
+      }
+
+      case "delete": {
         if (output.startsWith('[DELETE]') || output.startsWith('[DEL]')) return output;
         const deleteIcon = this.getFileTypeIcon(filePath);
         return `[DELETE] ${deleteIcon} ${filePath}${multipleFiles}\n${output}`;
-        
-      case "execute":
+      }
+
+      case "execute": {
         if (output.startsWith('$')) return output;
         const command = this.extractCommand(context.input);
         const commandLine = command ? `$ ${command}` : '$ Command executed';
         return `${commandLine}\n${output}`;
-        
-      case "edit":
+      }
+
+      case "edit": {
         if (output.startsWith('[EDIT]') || output.startsWith('[EDIT]')) return output;
         const editIcon = this.getFileTypeIcon(filePath);
         const diffOutput = this.createDiffVisualization(output, filePath);
         return `[EDIT] ${editIcon} ${filePath}${multipleFiles}\n${diffOutput}`;
-        
-      case "search":
+      }
+
+      case "search": {
         if (output.startsWith('[SEARCH]')) return output;
         return `[SEARCH] Pattern: ${this.extractSearchPattern(context.input) || 'unknown'}\n${output}`;
-        
-      case "read":
+      }
+
+      case "read": {
         if (output.startsWith('[READ]') || output.startsWith('[READ]')) return output;
         const lines = output.split('\n').length;
         const chars = output.length;
         const fileIcon = this.getFileTypeIcon(filePath);
         const highlightedOutput = this.addSyntaxHighlighting(output, filePath);
         return `[READ] ${fileIcon} ${filePath} (${lines} lines, ${chars} chars)\n${highlightedOutput}`;
-        
-      default:
+      }
+
+      default: {
         // Handle additional operation types in default case
         const opType = operationType?.toUpperCase() || 'OPERATION';
         const toolNameLower = context.toolName.toLowerCase();
-        
-        // Handle specific tools
+
+        // Handle specific tools with enhanced formatting
         if (toolNameLower.includes('write') || context.toolName === 'Write') {
           const writeLines = output.split('\n').length;
           const writeChars = output.length;
           return `[WRITE] ${filePath}${multipleFiles} (${writeLines} lines, ${writeChars} chars)\n${output}`;
         }
-        
+
         if (toolNameLower.includes('webfetch') || toolNameLower.includes('fetch')) {
           const url = this.extractUrl(context.input);
           const fetchLines = output.split('\n').length;
           const fetchChars = output.length;
           return `[WEBFETCH] ${url || 'URL'} (${fetchLines} lines, ${fetchChars} chars fetched)\n${output}`;
         }
-        
+
         if (toolNameLower.includes('grep') || context.toolName === 'Grep') {
           const pattern = this.extractSearchPattern(context.input);
           const results = output.split('\n').filter(line => line.trim().length > 0).length;
-          return `[GREP] Pattern: ${pattern || 'unknown'} (${results} results)\n${output}`;
+          return `[GREP] Pattern: "${pattern || 'unknown'}" (${results} results)\n${output}`;
         }
-        
+
         if (toolNameLower.includes('bash') || context.toolName === 'Bash') {
           if (output.startsWith('$')) return output;
           const command = this.extractCommand(context.input);
           const commandLine = command ? `$ ${command}` : '$ Command executed';
           return `${commandLine}\n${output}`;
         }
-        
+
         if (toolNameLower.includes('multiedit') || context.toolName === 'MultiEdit') {
           const editLines = output.split('\n').length;
           const editChars = output.length;
           return `[MULTIEDIT] ${filePath}${multipleFiles} (${editLines} lines, ${editChars} chars)\n${output}`;
         }
-        
+
+        // Handle Sub-Agent tool
+        if (context.toolName === 'Agent') {
+          const description = this.extractAgentDescription(context.input);
+          const subagentType = this.extractSubagentType(context.input);
+          return `[AGENT] ${description || 'Task delegation'} (${subagentType || 'specialized'})\n${output}`;
+        }
+
+        // Handle Background Shell Output tool
+        if (context.toolName === 'BashOutput') {
+          const bashId = this.extractBashId(context.input);
+          const filter = this.extractOutputFilter(context.input);
+          const filtered = filter ? ` (filtered: ${filter})` : '';
+          return `[BASH-OUT] Background process ${bashId || 'unknown'}${filtered}\n${output}`;
+        }
+
+        // Handle Exit Plan Mode tool
+        if (context.toolName === 'ExitPlanMode') {
+          const planSummary = this.extractPlanSummary(context.input);
+          return `[PLAN-COMPLETE] ${planSummary || 'Plan execution finished'}\n${output}`;
+        }
+
+        // Handle Glob tool (advanced file pattern matching)
+        if (context.toolName === 'Glob') {
+          const pattern = this.extractGlobPattern(context.input);
+          const path = this.extractGlobPath(context.input);
+          const resultCount = this.extractResultCount(output);
+          const pathInfo = path && path !== '.' ? ` in ${path}` : '';
+          return `[GLOB] Pattern: "${pattern || '*'}"${pathInfo} (${resultCount} matches)\n${output}`;
+        }
+
+        // Handle Kill Shell tool
+        if (context.toolName === 'KillShell') {
+          const shellId = this.extractShellId(context.input);
+          return `[KILL-SHELL] Terminated background process ${shellId || 'unknown'}\n${output}`;
+        }
+
+        // Handle Notebook Edit tool
+        if (context.toolName === 'NotebookEdit') {
+          const cellCount = this.extractCellCount(output);
+          const notebookPath = this.extractNotebookPath(context.input);
+          return `[NOTEBOOK] ${notebookPath || 'notebook'} (${cellCount} cells modified)\n${output}`;
+        }
+
+        // Handle Todo Write tool
+        if (context.toolName === 'TodoWrite') {
+          const taskCount = this.extractTaskCount(output);
+          const planType = this.extractPlanType(context.input);
+          return `[TODO] ${planType || 'Task planning'} (${taskCount} tasks)\n${output}`;
+        }
+
+        // Handle Web Search tool
+        if (context.toolName === 'WebSearch') {
+          const query = this.extractSearchQuery(context.input);
+          const resultCount = this.extractSearchResultCount(output);
+          return `[WEB-SEARCH] "${query || 'query'}" (${resultCount} results)\n${output}`;
+        }
+
+        // Handle MCP resource tools
+        if (toolNameLower.includes('listmcpre') || context.toolName === 'ListMcpResources') {
+          const serverName = this.extractServerName(context.input);
+          const resourceCount = this.extractResourceCount(output);
+          return `[MCP-LIST] ${serverName || 'All Servers'} (${resourceCount} resources)\n${output}`;
+        }
+
+        if (toolNameLower.includes('readmcp') || context.toolName === 'ReadMcpResource') {
+          const uri = this.extractMcpUri(context.input);
+          const contentType = this.extractContentType(output);
+          return `[MCP-READ] ${uri || 'Resource'} (${contentType})\n${output}`;
+        }
+
+        if (toolNameLower.includes('mcp') && !toolNameLower.includes('list') && !toolNameLower.includes('read')) {
+          const serverName = this.extractServerName(context.input);
+          const toolName = this.extractMcpToolName(context.input);
+          return `[MCP-TOOL] ${serverName || 'Server'}.${toolName || 'Tool'}\n${output}`;
+        }
+
         return filePath ? `[${opType}] ${filePath}${multipleFiles}\n${output}` : output;
+      }
     }
   }
 
@@ -1169,6 +1283,301 @@ export class ClaudeACPAgent implements Agent {
     
     return null;
   }
+
+  /**
+   * Extracts server name from MCP tool input
+   */
+  private extractServerName(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.server_name) {
+      return String(inputObj.server_name);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts MCP resource URI from input
+   */
+  private extractMcpUri(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.uri) {
+      const uri = String(inputObj.uri);
+      return uri.length > 60 ? uri.substring(0, 57) + '...' : uri;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts MCP tool name from input
+   */
+  private extractMcpToolName(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.tool_name) {
+      return String(inputObj.tool_name);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts resource count from MCP list output
+   */
+  private extractResourceCount(output: string): number {
+    try {
+      const lines = output.trim().split('\n');
+      return lines.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Extracts content type from MCP resource output
+   */
+  private extractContentType(output: string): string {
+    const lines = output.split('\n');
+    const contentLength = output.length;
+    const lineCount = lines.length;
+
+    if (contentLength < 100) return 'text';
+    if (lineCount > 10) return `${lineCount} lines`;
+    return `${contentLength} chars`;
+  }
+
+  /**
+   * Extracts agent description from Agent tool input
+   */
+  private extractAgentDescription(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.description) {
+      const desc = String(inputObj.description);
+      return desc.length > 40 ? desc.substring(0, 37) + '...' : desc;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts subagent type from Agent tool input
+   */
+  private extractSubagentType(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.subagent_type) {
+      return String(inputObj.subagent_type);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts bash ID from BashOutput tool input
+   */
+  private extractBashId(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.bash_id) {
+      return String(inputObj.bash_id);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts output filter from BashOutput tool input
+   */
+  private extractOutputFilter(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.filter) {
+      const filter = String(inputObj.filter);
+      return filter.length > 20 ? filter.substring(0, 17) + '...' : filter;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts plan summary from ExitPlanMode tool input
+   */
+  private extractPlanSummary(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.plan) {
+      const plan = String(inputObj.plan);
+      return plan.length > 50 ? plan.substring(0, 47) + '...' : plan;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts glob pattern from Glob tool input
+   */
+  private extractGlobPattern(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.pattern) {
+      return String(inputObj.pattern);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts glob path from Glob tool input
+   */
+  private extractGlobPath(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.path) {
+      return String(inputObj.path);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts result count from tool output
+   */
+  private extractResultCount(output: string): number {
+    try {
+      const lines = output.trim().split('\n').filter(line => line.trim().length > 0);
+      return lines.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Extracts shell ID from KillShell tool input
+   */
+  private extractShellId(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.shell_id) {
+      return String(inputObj.shell_id);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts cell count from notebook output
+   */
+  private extractCellCount(output: string): number {
+    try {
+      // Look for cell-related patterns in the output
+      const cellMatches = output.match(/cell|Cell/g);
+      return cellMatches ? cellMatches.length : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  /**
+   * Extracts notebook path from NotebookEdit tool input
+   */
+  private extractNotebookPath(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.file_path) {
+      const path = String(inputObj.file_path);
+      const filename = path.split('/').pop() || path;
+      return filename;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts task count from todo output
+   */
+  private extractTaskCount(output: string): number {
+    try {
+      const lines = output.trim().split('\n').filter(line =>
+        line.trim().length > 0 && (
+          line.includes('TODO') ||
+          line.includes('TASK') ||
+          line.includes('PLAN') ||
+          line.includes('- ') ||
+          line.includes('* ')
+        )
+      );
+      return Math.max(lines.length, 1);
+    } catch {
+      return 1;
+    }
+  }
+
+  /**
+   * Extracts plan type from TodoWrite tool input
+   */
+  private extractPlanType(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    // Try to infer plan type from input context
+    if (inputObj.type || inputObj.category) {
+      return String(inputObj.type || inputObj.category);
+    }
+
+    return 'Implementation';
+  }
+
+  /**
+   * Extracts search query from WebSearch tool input
+   */
+  private extractSearchQuery(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.query) {
+      const query = String(inputObj.query);
+      return query.length > 30 ? query.substring(0, 27) + '...' : query;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts search result count from web search output
+   */
+  private extractSearchResultCount(output: string): number {
+    try {
+      const lines = output.trim().split('\n').filter(line =>
+        line.trim().length > 0 && (
+          line.includes('Result') ||
+          line.includes('Search result') ||
+          line.includes('Found') ||
+          line.match(/^\d+\./)
+        )
+      );
+      return Math.max(lines.length, 1);
+    } catch {
+      return 1;
+    }
+  }
+
+
 
   /**
    * Extracts search pattern from input for display purposes
@@ -1390,7 +1799,7 @@ export class ClaudeACPAgent implements Agent {
   /**
    * Creates before/after diff visualization for edit operations
    */
-  private createDiffVisualization(output: string, filePath: string): string {
+  private createDiffVisualization(output: string, _filePath: string): string {
     // Simple diff extraction from common edit tool outputs
     if (!output.includes('→') && !output.includes('-') && !output.includes('+')) {
       return output; // No diff indicators found

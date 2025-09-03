@@ -69,11 +69,11 @@ describe('ClaudeACPAgent', () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440000' // Valid UUID
       
       // Should not throw error
-      await expect(agent.loadSession?.({ 
-        sessionId, 
+      await expect(agent.loadSession?.({
+        sessionId,
         cwd: process.cwd(),
         mcpServers: []
-      })).resolves.toBeUndefined()
+      })).resolves.toBeNull()
     })
   })
 
@@ -109,7 +109,7 @@ describe('ClaudeACPAgent', () => {
 
   describe('Authentication', () => {
     it('should handle authentication requests', async () => {
-      await expect(agent.authenticate({})).resolves.toBeUndefined()
+      await expect(agent.authenticate({})).resolves.toBeNull()
     })
   })
 
