@@ -3,8 +3,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-code";
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { EventEmitter } from 'events';
-import * as os from 'node:os';
+
 import type { Agent, Client } from "./protocol.js";
 import * as schema from "./schema.js";
 import {
@@ -38,145 +37,17 @@ import { globalResourceManager } from './resource-manager.js';
 import { getGlobalErrorHandler, handleResourceError } from './error-handler.js';
 import { getGlobalPerformanceMonitor, withPerformanceTracking } from './performance-monitor.js';
 
-// ========== PERFORMANCE CACHING SYSTEM ==========
+// New modular imports
+import { StreamingManager } from './streaming/index.js';
+import { CacheManager } from './cache/index.js';
+import { SessionManager } from './session/index.js';
+import { ToolEnhancer } from './tools/index.js';
 
-// Cache interfaces
-interface CacheEntry<T = unknown> {
-  value: T;
-  timestamp: number;
-  ttl?: number;
-  hits: number;
-  lastAccessed: number;
-  size: number;
-  metadata?: Record<string, unknown>;
-}
 
-interface CacheOptions {
-  maxSize: number;
-  defaultTTL: number;
-  enableCompression?: boolean;
-  strategy: 'lru' | 'lfu' | 'fifo';
-}
 
-interface CacheStats {
-  hits: number;
-  misses: number;
-  evictions: number;
-  size: number;
-  maxSize: number;
-  hitRate: number;
-  totalRequests: number;
-  averageAccessTime: number;
-}
 
-interface PerformanceMetrics {
-  operationCount: number;
-  totalTime: number;
-  averageTime: number;
-  p95Time: number;
-  p99Time: number;
-  cacheHitRate: number;
-  memoryUsage: number;
-  throughput: number;
-}
 
-// ========== PLUGIN ARCHITECTURE ==========
-
-// Plugin interfaces
-interface PluginTool {
-  name: string;
-  description: string;
-  version: string;
-  capabilities: PluginCapability[];
-  execute: (input: unknown, context: PluginExecutionContext) => Promise<PluginExecutionResult>;
-  validate?: (input: unknown) => Promise<PluginValidationResult>;
-  schema?: {
-    input: unknown;
-    output: unknown;
-  };
-}
-
-interface PluginCapability {
-  type: 'tool' | 'middleware' | 'transformer' | 'validator';
-  operations: string[];
-  metadata?: Record<string, unknown>;
-}
-
-interface PluginExecutionContext {
-  sessionId: string;
-  toolCallId: string;
-  userId?: string;
-  permissions: string[];
-  metadata: Record<string, unknown>;
-}
-
-interface PluginExecutionResult {
-  success: boolean;
-  output: unknown;
-  error?: string;
-  metadata?: Record<string, unknown>;
-  duration?: number;
-}
-
-interface PluginValidationResult {
-  valid: boolean;
-  errors?: string[];
-  warnings?: string[];
-}
-
-interface PluginManifest {
-  name: string;
-  version: string;
-  description: string;
-  author: string;
-  main: string;
-  dependencies?: Record<string, string>;
-  capabilities: PluginCapability[];
-  metadata?: Record<string, unknown>;
-}
-
-interface PluginInstance {
-  manifest: PluginManifest;
-  tools: PluginTool[];
-  middleware?: PluginMiddleware[];
-  state: 'loaded' | 'active' | 'error' | 'disabled';
-  error?: string;
-  loadedAt: number;
-  metadata: Record<string, unknown>;
-}
-
-interface PluginMiddleware {
-  name: string;
-  priority: number;
-  intercept: (context: PluginExecutionContext, next: () => Promise<PluginExecutionResult>) => Promise<PluginExecutionResult>;
-}
-
-// Real-time streaming interfaces
-interface StreamingOperation {
-  id: string;
-  sessionId: string;
-  toolCallId: string;
-  toolName: string;
-  startTime: number;
-  lastUpdate: number;
-  progress: number;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  estimatedDuration?: number;
-  currentStep?: string;
-  totalSteps?: number;
-  metadata: Record<string, unknown>;
-}
-
-interface StreamingUpdate {
-  type: 'progress' | 'status' | 'step' | 'completion';
-  operationId: string;
-  sessionId: string;
-  toolCallId: string;
-  data: Record<string, unknown>;
-  timestamp: number;
-}
-
-interface AgentSession {
+export interface AgentSession {
   pendingPrompt: AsyncIterableIterator<SDKMessage> | null;
   abortController: AbortController | null;
   claudeSessionId?: string;
@@ -202,24 +73,11 @@ export class ClaudeACPAgent implements Agent {
   private pathToClaudeCodeExecutable: string | undefined;
   private claudeSDKCircuitBreaker: CircuitBreaker<{ prompt: string; options: Record<string, unknown> }, AsyncIterableIterator<SDKMessage>>;
 
-  // Real-time streaming system
-  private streamingOperations: Map<string, StreamingOperation> = new Map();
-  private streamingClients: Set<Client> = new Set();
-  private streamingTimer: NodeJS.Timeout | null = null;
-
-  // Plugin system
-  private plugins: Map<string, PluginInstance> = new Map();
-  private pluginDirectories: string[] = [];
-  private pluginMiddleware: PluginMiddleware[] = [];
-  private pluginEventEmitter: EventEmitter;
-
-  // Performance caching system
-  private resultCache: Map<string, CacheEntry> = new Map();
-  private fileCache: Map<string, CacheEntry<string>> = new Map();
-  private computationCache: Map<string, CacheEntry> = new Map();
-  private cacheOptions!: CacheOptions;
-  private cacheStats!: CacheStats;
-  private performanceMetrics!: PerformanceMetrics;
+  // Manager instances
+  private readonly streamingManager: StreamingManager;
+  private readonly cacheManager: CacheManager;
+  private readonly sessionManager: SessionManager;
+  private readonly toolEnhancer: ToolEnhancer;
 
   // Enhanced ACP capabilities
   private readonly enhancedCapabilities: EnhancedPromptCapabilities = {
@@ -254,18 +112,20 @@ export class ClaudeACPAgent implements Agent {
     this.contextMonitor = new ContextMonitor();
     this.claudeSDKCircuitBreaker = new CircuitBreaker(async (args) => query(args), CLAUDE_SDK_CIRCUIT_OPTIONS);
 
-    // Initialize plugin system
-    this.pluginEventEmitter = new EventEmitter();
-    // Note: Plugin initialization will be completed asynchronously
+    // Initialize new modular managers
+    this.streamingManager = new StreamingManager();
+    this.cacheManager = new CacheManager();
+    this.sessionManager = new SessionManager();
+    this.toolEnhancer = new ToolEnhancer();
 
-    // Initialize caching system
-    this.initializeCachingSystem();
+    // Register streaming client
+    this.streamingManager.registerStreamingClient(client);
 
     // Enhanced startup logging inspired by Gemini CLI
     this.logStartupConfiguration();
 
-    // Initialize session persistence and cleanup
-    this.cleanupOldSessions();
+    // Initialize session cleanup
+    this.sessionManager.cleanupOldSessions();
 
     this.logger.info(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`);
   }
@@ -298,1064 +158,17 @@ export class ClaudeACPAgent implements Agent {
    * Completes asynchronous initialization (call after construction)
    */
   public async completeInitialization(): Promise<void> {
-    await this.initializePluginSystem();
+    // Plugin system is now handled by PluginManager
   }
 
-  // ========== REAL-TIME STREAMING SYSTEM ==========
 
-  /**
-   * Starts a new streaming operation
-   */
-  private startStreamingOperation(
-    sessionId: string,
-    toolCallId: string,
-    toolName: string,
-    estimatedDuration?: number,
-    totalSteps?: number
-  ): string {
-    const operationId = `op-${sessionId}-${toolCallId}-${Date.now()}`;
-    const operation: StreamingOperation = {
-      id: operationId,
-      sessionId,
-      toolCallId,
-      toolName,
-      startTime: Date.now(),
-      lastUpdate: Date.now(),
-      progress: 0,
-      status: 'pending',
-      estimatedDuration,
-      totalSteps,
-      currentStep: 'initializing',
-      metadata: {}
-    };
 
-    this.streamingOperations.set(operationId, operation);
-    this.logger.debug(`Started streaming operation: ${operationId} (${toolName})`);
 
-    // Start the streaming update timer if not already running
-    if (!this.streamingTimer) {
-      this.startStreamingTimer();
-    }
 
-    return operationId;
-  }
 
-  /**
-   * Updates streaming operation progress
-   */
-  private updateStreamingProgress(
-    operationId: string,
-    progress: number,
-    currentStep?: string,
-    metadata?: Record<string, unknown>
-  ): void {
-    const operation = this.streamingOperations.get(operationId);
-    if (!operation) return;
 
-    operation.progress = Math.max(0, Math.min(100, progress));
-    operation.lastUpdate = Date.now();
-    if (currentStep) operation.currentStep = currentStep;
-    if (metadata) Object.assign(operation.metadata, metadata);
 
-    this.logger.debug(`Updated streaming operation ${operationId}: ${progress}% - ${currentStep || 'processing'}`);
-  }
 
-  /**
-   * Completes a streaming operation
-   */
-  private completeStreamingOperation(operationId: string, success: boolean = true): void {
-    const operation = this.streamingOperations.get(operationId);
-    if (!operation) return;
-
-    operation.status = success ? 'completed' : 'failed';
-    operation.progress = success ? 100 : 0;
-    operation.lastUpdate = Date.now();
-
-    this.logger.debug(`Completed streaming operation: ${operationId} (${success ? 'success' : 'failed'})`);
-
-    // Send final update and cleanup
-    setTimeout(() => {
-      this.streamingOperations.delete(operationId);
-    }, 5000); // Keep for 5 seconds after completion
-  }
-
-  /**
-   * Starts the streaming update timer
-   */
-  private startStreamingTimer(): void {
-    this.streamingTimer = setInterval(() => {
-      this.processStreamingUpdates();
-    }, ClaudeACPAgent.STREAMING_UPDATE_INTERVAL);
-  }
-
-  /**
-   * Processes and sends streaming updates to clients
-   */
-  private async processStreamingUpdates(): Promise<void> {
-    if (this.streamingOperations.size === 0) {
-      if (this.streamingTimer) {
-        clearInterval(this.streamingTimer);
-        this.streamingTimer = null;
-      }
-      return;
-    }
-
-    const now = Date.now();
-    const updates: StreamingUpdate[] = [];
-
-    for (const operation of this.streamingOperations.values()) {
-      // Skip completed operations older than 30 seconds
-      if (operation.status === 'completed' && (now - operation.lastUpdate) > 30000) {
-        continue;
-      }
-
-      // Calculate estimated progress based on time for long-running operations
-      if (operation.status === 'running' && operation.estimatedDuration) {
-        const elapsed = now - operation.startTime;
-        const estimatedProgress = Math.min(90, (elapsed / operation.estimatedDuration) * 100);
-        if (estimatedProgress > operation.progress) {
-          operation.progress = estimatedProgress;
-        }
-      }
-
-      // Create progress update
-      updates.push({
-        type: 'progress',
-        operationId: operation.id,
-        sessionId: operation.sessionId,
-        toolCallId: operation.toolCallId,
-        data: {
-          progress: operation.progress,
-          status: operation.status,
-          currentStep: operation.currentStep,
-          elapsedTime: now - operation.startTime,
-          metadata: operation.metadata
-        },
-        timestamp: now
-      });
-    }
-
-    // Send updates to all streaming clients
-    if (updates.length > 0) {
-      await this.broadcastStreamingUpdates(updates);
-    }
-  }
-
-  /**
-   * Broadcasts streaming updates to all registered clients
-   */
-  private async broadcastStreamingUpdates(updates: StreamingUpdate[]): Promise<void> {
-    for (const client of this.streamingClients) {
-      try {
-        for (const update of updates) {
-          await client.sessionUpdate({
-            sessionId: update.sessionId,
-            update: {
-              sessionUpdate: "streaming_update",
-              operationId: update.operationId,
-              toolCallId: update.toolCallId,
-              type: update.type,
-              data: update.data,
-              timestamp: update.timestamp
-            }
-          });
-        }
-      } catch (error) {
-        this.logger.warn(`Failed to send streaming update to client: ${error}`);
-      }
-    }
-  }
-
-  /**
-   * Registers a client for streaming updates
-   */
-  private registerStreamingClient(client: Client): void {
-    this.streamingClients.add(client);
-    this.logger.debug(`Registered streaming client: ${this.streamingClients.size} total clients`);
-  }
-
-  /**
-   * Unregisters a client from streaming updates
-   */
-  private unregisterStreamingClient(client: Client): void {
-    this.streamingClients.delete(client);
-    this.logger.debug(`Unregistered streaming client: ${this.streamingClients.size} remaining clients`);
-  }
-
-  /**
-   * Estimates operation duration based on tool type and context
-   */
-  private estimateOperationDuration(operationContext: ToolOperationContext): number {
-    const { toolName, complexity, affectedFiles } = operationContext;
-    let baseDuration = 2000; // 2 seconds base
-
-    // Tool-specific duration estimates
-    switch (toolName?.toLowerCase()) {
-      case 'grep':
-      case 'search':
-        baseDuration = 5000; // 5 seconds for search operations
-        break;
-      case 'webfetch':
-        baseDuration = 10000; // 10 seconds for web requests
-        break;
-      case 'multiedit':
-        baseDuration = affectedFiles ? affectedFiles.length * 3000 : 8000;
-        break;
-      case 'bash':
-      case 'run':
-        baseDuration = 15000; // 15 seconds for shell operations
-        break;
-      case 'notebook':
-        baseDuration = 8000; // 8 seconds for notebook operations
-        break;
-      default:
-        baseDuration = complexity === 'complex' ? 5000 : 2000;
-    }
-
-    // Scale by file count for file operations
-    if (affectedFiles && affectedFiles.length > 1) {
-      baseDuration *= Math.min(affectedFiles.length, 5); // Cap at 5x
-    }
-
-    return baseDuration;
-  }
-
-  /**
-   * Estimates operation steps based on tool type and context
-   */
-  private estimateOperationSteps(operationContext: ToolOperationContext): number {
-    const { toolName, complexity, affectedFiles } = operationContext;
-
-    switch (toolName?.toLowerCase()) {
-      case 'multiedit':
-        return affectedFiles ? Math.max(affectedFiles.length, 3) : 3;
-      case 'notebook':
-        return 4; // analyze, read, edit, save
-      case 'grep':
-        return 2; // search, process results
-      case 'webfetch':
-        return 3; // request, download, process
-      case 'bash':
-        return 2; // execute, capture output
-      default:
-        return complexity === 'complex' ? 3 : 1;
-    }
-  }
-
-  /**
-   * Updates streaming progress for long-running operations
-   */
-  private updateOperationProgress(
-    sessionId: string,
-    toolCallId: string,
-    progress: number,
-    currentStep: string,
-    metadata?: Record<string, unknown>
-  ): void {
-    const session = this.getSession(sessionId);
-    const operationContext = session.operationContext?.get(toolCallId);
-    if (operationContext?.streamingOperationId) {
-      this.updateStreamingProgress(
-        operationContext.streamingOperationId,
-        progress,
-        currentStep,
-        metadata
-      );
-    }
-  }
-
-  // ========== PLUGIN SYSTEM ==========
-
-  /**
-   * Initializes the plugin system
-   */
-  private async initializePluginSystem(): Promise<void> {
-    // Set up default plugin directories
-    this.pluginDirectories = [
-      path.join(process.cwd(), 'plugins'),
-      path.join(process.cwd(), '.acp-plugins'),
-      path.join(os.homedir(), '.acp-plugins')
-    ];
-
-    // Ensure plugin directories exist
-    this.pluginDirectories.forEach(dir => {
-      try {
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-      } catch (error) {
-        this.logger.warn(`Failed to create plugin directory ${dir}: ${error}`);
-      }
-    });
-
-    // Set up plugin event handlers
-    this.pluginEventEmitter.on('pluginLoaded', (plugin: PluginInstance) => {
-      this.logger.info(`Plugin event: ${plugin.manifest.name} loaded`);
-    });
-
-    this.pluginEventEmitter.on('pluginEnabled', (plugin: PluginInstance) => {
-      this.logger.info(`Plugin event: ${plugin.manifest.name} enabled`);
-    });
-
-    this.pluginEventEmitter.on('pluginDisabled', (plugin: PluginInstance) => {
-      this.logger.info(`Plugin event: ${plugin.manifest.name} disabled`);
-    });
-
-    // Load plugins from all directories
-    for (const dir of this.pluginDirectories) {
-      await this.discoverAndLoadPlugins(dir);
-    }
-
-    this.logger.info(`Plugin system initialized with ${this.plugins.size} plugins loaded`);
-  }
-
-  /**
-   * Discovers and loads plugins from a directory
-   */
-  private async discoverAndLoadPlugins(directory: string): Promise<void> {
-    try {
-      if (!fs.existsSync(directory)) {
-        return;
-      }
-
-      const entries = fs.readdirSync(directory, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          const pluginPath = path.join(directory, entry.name);
-          this.loadPlugin(pluginPath);
-        } else if (entry.name.endsWith('.js') || entry.name.endsWith('.ts')) {
-          // Direct plugin file
-          const pluginPath = path.join(directory, entry.name);
-          await this.loadPluginFile(pluginPath);
-        }
-      }
-    } catch (error) {
-      this.logger.warn(`Failed to discover plugins in ${directory}: ${error}`);
-    }
-  }
-
-  /**
-   * Loads a plugin from a directory
-   */
-  private loadPlugin(pluginPath: string): void {
-    try {
-      const manifestPath = path.join(pluginPath, 'manifest.json');
-      if (!fs.existsSync(manifestPath)) {
-        return; // Not a valid plugin directory
-      }
-
-      const manifest: PluginManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      const mainPath = path.join(pluginPath, manifest.main);
-
-      if (!fs.existsSync(mainPath)) {
-        this.logger.warn(`Plugin ${manifest.name}: main file ${manifest.main} not found`);
-        return;
-      }
-
-      this.loadPluginFile(mainPath, manifest);
-    } catch (error) {
-      this.logger.warn(`Failed to load plugin from ${pluginPath}: ${error}`);
-    }
-  }
-
-  /**
-   * Loads a plugin from a file
-   */
-  private async loadPluginFile(filePath: string, manifest?: PluginManifest): Promise<void> {
-    try {
-      // Use dynamic import for ES6 modules
-      const pluginModule = await import(filePath);
-
-      if (!pluginModule || typeof pluginModule !== 'object') {
-        this.logger.warn(`Plugin file ${filePath} does not export a valid plugin`);
-        return;
-      }
-
-      const pluginName = manifest?.name || path.basename(filePath, path.extname(filePath));
-      const pluginInstance: PluginInstance = {
-        manifest: manifest || {
-          name: pluginName,
-          version: pluginModule.version || '1.0.0',
-          description: pluginModule.description || 'Custom plugin',
-          author: pluginModule.author || 'Unknown',
-          main: path.basename(filePath),
-          capabilities: pluginModule.capabilities || []
-        },
-        tools: pluginModule.tools || [],
-        middleware: pluginModule.middleware || [],
-        state: 'loaded',
-        loadedAt: Date.now(),
-        metadata: pluginModule.metadata || {}
-      };
-
-      this.plugins.set(pluginName, pluginInstance);
-      this.logger.info(`Loaded plugin: ${pluginName} v${pluginInstance.manifest.version}`);
-
-      // Register middleware
-      if (pluginInstance.middleware) {
-        pluginInstance.middleware.forEach(middleware => {
-          this.pluginMiddleware.push(middleware);
-          this.pluginMiddleware.sort((a, b) => a.priority - b.priority);
-        });
-      }
-
-      // Emit plugin loaded event
-      this.pluginEventEmitter.emit('pluginLoaded', pluginInstance);
-
-    } catch (error) {
-      this.logger.warn(`Failed to load plugin file ${filePath}: ${error}`);
-    }
-  }
-
-  /**
-   * Executes a plugin tool
-   */
-  private async executePluginTool(
-    pluginName: string,
-    toolName: string,
-    input: unknown,
-    context: PluginExecutionContext
-  ): Promise<PluginExecutionResult> {
-    const plugin = this.plugins.get(pluginName);
-    if (!plugin || plugin.state !== 'active') {
-      return {
-        success: false,
-        output: null,
-        error: `Plugin ${pluginName} not found or not active`
-      };
-    }
-
-    const tool = plugin.tools.find(t => t.name === toolName);
-    if (!tool) {
-      return {
-        success: false,
-        output: null,
-        error: `Tool ${toolName} not found in plugin ${pluginName}`
-      };
-    }
-
-    try {
-      // Validate input if validator exists
-      if (tool.validate) {
-        const validationResult = await tool.validate(input);
-        if (!validationResult.valid) {
-          return {
-            success: false,
-            output: null,
-            error: `Validation failed: ${validationResult.errors?.join(', ')}`
-          };
-        }
-      }
-
-      // Execute through middleware chain
-      const result = await this.executeThroughMiddleware(tool, input, context);
-
-      // Update plugin metrics
-      plugin.metadata.lastExecution = Date.now();
-      plugin.metadata.executionCount = ((plugin.metadata.executionCount as number) || 0) + 1;
-
-      return result;
-    } catch (error) {
-      this.logger.error(`Plugin tool execution failed: ${pluginName}.${toolName}`, error);
-      return {
-        success: false,
-        output: null,
-        error: `Execution failed: ${error instanceof Error ? error.message : String(error)}`
-      };
-    }
-  }
-
-  /**
-   * Executes a tool through the middleware chain
-   */
-  private async executeThroughMiddleware(
-    tool: PluginTool,
-    input: unknown,
-    context: PluginExecutionContext
-  ): Promise<PluginExecutionResult> {
-    let index = 0;
-
-    const next = async (): Promise<PluginExecutionResult> => {
-      if (index < this.pluginMiddleware.length) {
-        const middleware = this.pluginMiddleware[index++];
-        return middleware.intercept(context, next);
-      } else {
-        // Execute the actual tool
-        const startTime = Date.now();
-        const result = await tool.execute(input, context);
-        result.duration = Date.now() - startTime;
-        return result;
-      }
-    };
-
-    return next();
-  }
-
-  /**
-   * Lists all available plugins
-   */
-  private getAvailablePlugins(): Array<{ name: string; description: string; version: string; tools: string[] }> {
-    return Array.from(this.plugins.values())
-      .filter(plugin => plugin.state === 'active')
-      .map(plugin => ({
-        name: plugin.manifest.name,
-        description: plugin.manifest.description,
-        version: plugin.manifest.version,
-        tools: plugin.tools.map(tool => tool.name)
-      }));
-  }
-
-  /**
-   * Enables a plugin
-   */
-  private enablePlugin(pluginName: string): boolean {
-    const plugin = this.plugins.get(pluginName);
-    if (!plugin) {
-      return false;
-    }
-
-    plugin.state = 'active';
-    this.pluginEventEmitter.emit('pluginEnabled', plugin);
-    this.logger.info(`Enabled plugin: ${pluginName}`);
-    return true;
-  }
-
-  /**
-   * Disables a plugin
-   */
-  private disablePlugin(pluginName: string): boolean {
-    const plugin = this.plugins.get(pluginName);
-    if (!plugin) {
-      return false;
-    }
-
-    plugin.state = 'disabled';
-    this.pluginEventEmitter.emit('pluginDisabled', plugin);
-    this.logger.info(`Disabled plugin: ${pluginName}`);
-    return true;
-  }
-
-  /**
-   * Gets plugin information
-   */
-  private getPluginInfo(pluginName: string): PluginInstance | null {
-    return this.plugins.get(pluginName) || null;
-  }
-
-  /**
-   * Handles plugin tool output
-   */
-  private async handlePluginToolOutput(
-    sessionId: string,
-    msg: ClaudeMessage,
-    pluginName: string,
-    toolName: string
-  ): Promise<void> {
-    const toolCallId = msg.id || "";
-    const session = this.getSession(sessionId);
-    const operationContext = session.operationContext?.get(toolCallId);
-
-    try {
-      // Execute plugin tool
-      const pluginContext: PluginExecutionContext = {
-        sessionId,
-        toolCallId,
-        permissions: [], // TODO: Implement permission system
-        metadata: {
-          operationContext,
-          timestamp: Date.now()
-        }
-      };
-
-      const result = await this.executePluginTool(pluginName, toolName, msg.input, pluginContext);
-
-      // Format plugin tool output
-      const enhancedContent = this.formatPluginToolOutput(result, pluginName, toolName);
-
-      // Send agent thought for plugin completion
-      if (session.thoughtStreaming && operationContext?.complexity === "complex") {
-        await this.sendAgentThought(sessionId, `Plugin ${pluginName}.${toolName} completed ${result.success ? 'successfully' : 'with errors'}`);
-      }
-
-      // Complete streaming operation
-      if (operationContext?.streamingOperationId) {
-        this.completeStreamingOperation(operationContext.streamingOperationId, result.success);
-      }
-
-      await this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId,
-          status: result.success ? "completed" : "failed",
-          content: [{
-            type: "content",
-            content: {
-              type: "text",
-              text: enhancedContent
-            }
-          }]
-        }
-      });
-
-    } catch (error) {
-      this.logger.error(`Plugin tool execution failed: ${pluginName}.${toolName}`, error);
-
-      await this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId,
-          status: "failed",
-          content: [{
-            type: "content",
-            content: {
-              type: "text",
-              text: `[PLUGIN-ERROR] ${pluginName}.${toolName}: ${error instanceof Error ? error.message : String(error)}`
-            }
-          }]
-        }
-      });
-    }
-  }
-
-  /**
-   * Formats plugin tool output for display
-   */
-  private formatPluginToolOutput(result: PluginExecutionResult, pluginName: string, toolName: string): string {
-    const status = result.success ? '[PLUGIN-SUCCESS]' : '[PLUGIN-ERROR]';
-    const duration = result.duration ? ` (${result.duration}ms)` : '';
-
-    let output = `${status} ${pluginName}.${toolName}${duration}\n`;
-
-    if (result.success) {
-      if (typeof result.output === 'string') {
-        output += result.output;
-      } else if (result.output) {
-        output += JSON.stringify(result.output, null, 2);
-      }
-    } else {
-      output += `Error: ${result.error || 'Unknown error'}`;
-    }
-
-    // Add metadata if available
-    if (result.metadata) {
-      const metadataStr = Object.entries(result.metadata)
-        .map(([key, value]) => `${key}: ${value}`)
-        .join(', ');
-      if (metadataStr) {
-        output += `\n[METADATA] ${metadataStr}`;
-      }
-    }
-
-    return output;
-  }
-
-  // ========== PERFORMANCE CACHING SYSTEM ==========
-
-  /**
-   * Initializes the caching system with default configuration
-   */
-  private initializeCachingSystem(): void {
-    this.cacheOptions = {
-      maxSize: parseInt(process.env.ACP_CACHE_MAX_SIZE || '1000'),
-      defaultTTL: parseInt(process.env.ACP_CACHE_TTL || '300000'), // 5 minutes
-      enableCompression: process.env.ACP_CACHE_COMPRESSION === 'true',
-      strategy: (process.env.ACP_CACHE_STRATEGY as 'lru' | 'lfu' | 'fifo') || 'lru'
-    };
-
-    this.cacheStats = {
-      hits: 0,
-      misses: 0,
-      evictions: 0,
-      size: 0,
-      maxSize: this.cacheOptions.maxSize,
-      hitRate: 0,
-      totalRequests: 0,
-      averageAccessTime: 0
-    };
-
-    this.performanceMetrics = {
-      operationCount: 0,
-      totalTime: 0,
-      averageTime: 0,
-      p95Time: 0,
-      p99Time: 0,
-      cacheHitRate: 0,
-      memoryUsage: 0,
-      throughput: 0
-    };
-
-    // Start cache maintenance timer
-    setInterval(() => this.maintainCache(), 60000); // Clean every minute
-    this.logger.info(`Cache system initialized: ${this.cacheOptions.maxSize} max entries, ${this.cacheOptions.strategy} strategy`);
-  }
-
-  /**
-   * Gets a cached result or computes and caches it
-   */
-  private async getCachedResult<T>(
-    key: string,
-    computeFn: () => Promise<T>,
-    ttl?: number
-  ): Promise<T> {
-    const cacheKey = this.generateCacheKey(key);
-    const cached = this.resultCache.get(cacheKey);
-
-    const startTime = Date.now();
-
-    if (cached && this.isCacheEntryValid(cached)) {
-      cached.hits++;
-      cached.lastAccessed = Date.now();
-      this.cacheStats.hits++;
-      this.updateCacheStats(startTime - Date.now());
-      this.logger.debug(`Cache hit for key: ${key}`);
-      return cached.value as T;
-    }
-
-    // Cache miss - compute the result
-    this.cacheStats.misses++;
-    const result = await computeFn();
-    const endTime = Date.now();
-
-    // Cache the result
-    this.setCachedResult(cacheKey, result, ttl);
-    this.updateCacheStats(endTime - startTime);
-
-    this.logger.debug(`Cache miss for key: ${key}, computed in ${endTime - startTime}ms`);
-    return result;
-  }
-
-  /**
-   * Caches a file content with automatic invalidation on modification
-   */
-  private async getCachedFileContent(filePath: string): Promise<string | null> {
-    const cacheKey = `file:${filePath}`;
-    const cached = this.fileCache.get(cacheKey);
-
-    if (cached && this.isCacheEntryValid(cached)) {
-      // Check if file has been modified
-      try {
-        const stats = fs.statSync(filePath);
-        if (stats.mtime.getTime() <= cached.timestamp) {
-          cached.hits++;
-          cached.lastAccessed = Date.now();
-          this.cacheStats.hits++;
-          this.logger.debug(`File cache hit: ${filePath}`);
-          return cached.value;
-        }
-      } catch (error) {
-        // File doesn't exist, remove from cache
-        this.fileCache.delete(cacheKey);
-        return null;
-      }
-    }
-
-    // Cache miss - read the file
-    try {
-      const content = fs.readFileSync(filePath, 'utf-8');
-      this.setCachedFileContent(filePath, content);
-      this.cacheStats.misses++;
-      this.logger.debug(`File cache miss: ${filePath}`);
-      return content;
-    } catch (error) {
-      this.logger.warn(`Failed to read file for caching: ${filePath}`);
-      return null;
-    }
-  }
-
-  /**
-   * Caches expensive computations
-   */
-  private getCachedComputation<T>(
-    key: string,
-    computeFn: () => T,
-    dependencies: string[] = []
-  ): T {
-    const cacheKey = `comp:${key}:${dependencies.sort().join(',')}`;
-    const cached = this.computationCache.get(cacheKey);
-
-    if (cached && this.isCacheEntryValid(cached)) {
-      cached.hits++;
-      cached.lastAccessed = Date.now();
-      this.cacheStats.hits++;
-      this.logger.debug(`Computation cache hit: ${key}`);
-      return cached.value as T;
-    }
-
-    // Cache miss - compute the result
-    const result = computeFn();
-    this.setCachedComputation(cacheKey, result);
-    this.cacheStats.misses++;
-    this.logger.debug(`Computation cache miss: ${key}`);
-    return result;
-  }
-
-  /**
-   * Sets a cached result
-   */
-  private setCachedResult(key: string, value: unknown, ttl?: number): void {
-    const entry: CacheEntry = {
-      value,
-      timestamp: Date.now(),
-      ttl: ttl || this.cacheOptions.defaultTTL,
-      hits: 0,
-      lastAccessed: Date.now(),
-      size: this.estimateSize(value)
-    };
-
-    this.resultCache.set(key, entry);
-    this.enforceCacheSize(this.resultCache);
-    this.cacheStats.size = this.resultCache.size;
-  }
-
-  /**
-   * Sets a cached file content
-   */
-  private setCachedFileContent(filePath: string, content: string): void {
-    const entry: CacheEntry<string> = {
-      value: content,
-      timestamp: Date.now(),
-      ttl: this.cacheOptions.defaultTTL,
-      hits: 0,
-      lastAccessed: Date.now(),
-      size: Buffer.byteLength(content, 'utf-8')
-    };
-
-    this.fileCache.set(`file:${filePath}`, entry);
-    this.enforceCacheSize(this.fileCache);
-  }
-
-  /**
-   * Sets a cached computation
-   */
-  private setCachedComputation(key: string, value: unknown): void {
-    const entry: CacheEntry = {
-      value,
-      timestamp: Date.now(),
-      ttl: this.cacheOptions.defaultTTL * 2, // Longer TTL for computations
-      hits: 0,
-      lastAccessed: Date.now(),
-      size: this.estimateSize(value)
-    };
-
-    this.computationCache.set(key, entry);
-    this.enforceCacheSize(this.computationCache);
-  }
-
-  /**
-   * Generates a cache key from various inputs
-   */
-  private generateCacheKey(...parts: (string | number | boolean)[]): string {
-    return parts.map(part => String(part)).join('|');
-  }
-
-  /**
-   * Checks if a cache entry is still valid
-   */
-  private isCacheEntryValid(entry: CacheEntry): boolean {
-    const now = Date.now();
-    const ttl = entry.ttl || this.cacheOptions.defaultTTL;
-    return (now - entry.timestamp) < ttl;
-  }
-
-  /**
-   * Estimates the size of a value in bytes
-   */
-  private estimateSize(value: unknown): number {
-    if (value === null || value === undefined) return 0;
-    if (typeof value === 'string') return Buffer.byteLength(value, 'utf-8');
-    if (typeof value === 'number') return 8;
-    if (typeof value === 'boolean') return 1;
-    if (Array.isArray(value)) return value.length * 8; // Rough estimate
-    if (typeof value === 'object') return JSON.stringify(value).length;
-    return 8; // Default size
-  }
-
-  /**
-   * Enforces cache size limits using the configured strategy
-   */
-  private enforceCacheSize(cache: Map<string, CacheEntry>): void {
-    while (cache.size >= this.cacheOptions.maxSize) {
-      let keyToRemove: string | null = null;
-
-      switch (this.cacheOptions.strategy) {
-        case 'lru': {
-          // Remove least recently used
-          let oldestAccess = Date.now();
-          for (const [key, entry] of cache.entries()) {
-            if (entry.lastAccessed < oldestAccess) {
-              oldestAccess = entry.lastAccessed;
-              keyToRemove = key;
-            }
-          }
-          break;
-        }
-
-        case 'lfu': {
-          // Remove least frequently used
-          let fewestHits = Infinity;
-          for (const [key, entry] of cache.entries()) {
-            if (entry.hits < fewestHits) {
-              fewestHits = entry.hits;
-              keyToRemove = key;
-            }
-          }
-          break;
-        }
-
-        case 'fifo': {
-          // Remove first (oldest)
-          const iterator = cache.keys().next();
-          keyToRemove = iterator.done ? null : iterator.value;
-          break;
-        }
-      }
-
-      if (keyToRemove) {
-        cache.delete(keyToRemove);
-        this.cacheStats.evictions++;
-      }
-    }
-  }
-
-  /**
-   * Maintains cache by cleaning expired entries
-   */
-  private maintainCache(): void {
-    const now = Date.now();
-    let cleaned = 0;
-
-    // Clean result cache
-    for (const [key, entry] of this.resultCache.entries()) {
-      if ((now - entry.timestamp) >= (entry.ttl || this.cacheOptions.defaultTTL)) {
-        this.resultCache.delete(key);
-        cleaned++;
-      }
-    }
-
-    // Clean file cache
-    for (const [key, entry] of this.fileCache.entries()) {
-      if ((now - entry.timestamp) >= (entry.ttl || this.cacheOptions.defaultTTL)) {
-        this.fileCache.delete(key);
-        cleaned++;
-      }
-    }
-
-    // Clean computation cache
-    for (const [key, entry] of this.computationCache.entries()) {
-      if ((now - entry.timestamp) >= (entry.ttl || this.cacheOptions.defaultTTL)) {
-        this.computationCache.delete(key);
-        cleaned++;
-      }
-    }
-
-    if (cleaned > 0) {
-      this.logger.debug(`Cache maintenance: cleaned ${cleaned} expired entries`);
-    }
-
-    // Update cache statistics
-    this.updateCacheStats(0);
-  }
-
-  /**
-   * Updates cache statistics
-   */
-  private updateCacheStats(accessTime: number): void {
-    const total = this.cacheStats.hits + this.cacheStats.misses;
-    if (total > 0) {
-      this.cacheStats.hitRate = this.cacheStats.hits / total;
-      this.cacheStats.totalRequests = total;
-      this.cacheStats.averageAccessTime = (this.cacheStats.averageAccessTime + accessTime) / 2;
-    }
-
-    // Update performance metrics
-    this.performanceMetrics.cacheHitRate = this.cacheStats.hitRate;
-    this.performanceMetrics.memoryUsage = this.estimateTotalCacheSize();
-  }
-
-  /**
-   * Estimates total cache size in bytes
-   */
-  private estimateTotalCacheSize(): number {
-    let totalSize = 0;
-
-    for (const entry of this.resultCache.values()) {
-      totalSize += entry.size;
-    }
-
-    for (const entry of this.fileCache.values()) {
-      totalSize += entry.size;
-    }
-
-    for (const entry of this.computationCache.values()) {
-      totalSize += entry.size;
-    }
-
-    return totalSize;
-  }
-
-  /**
-   * Gets cache statistics for monitoring
-   */
-  private getCacheStats(): CacheStats & PerformanceMetrics {
-    return {
-      ...this.cacheStats,
-      ...this.performanceMetrics
-    };
-  }
-
-  /**
-   * Clears all caches
-   */
-  private clearAllCaches(): void {
-    this.resultCache.clear();
-    this.fileCache.clear();
-    this.computationCache.clear();
-
-    this.cacheStats.size = 0;
-    this.cacheStats.evictions = 0;
-
-    this.logger.info('All caches cleared');
-  }
-
-  /**
-   * Invalidates cache entries by pattern
-   */
-  private invalidateCache(pattern: string): number {
-    let invalidated = 0;
-    const regex = new RegExp(pattern);
-
-    // Invalidate result cache
-    for (const [key] of this.resultCache) {
-      if (regex.test(key)) {
-        this.resultCache.delete(key);
-        invalidated++;
-      }
-    }
-
-    // Invalidate file cache
-    for (const [key] of this.fileCache) {
-      if (regex.test(key)) {
-        this.fileCache.delete(key);
-        invalidated++;
-      }
-    }
-
-    // Invalidate computation cache
-    for (const [key] of this.computationCache) {
-      if (regex.test(key)) {
-        this.computationCache.delete(key);
-        invalidated++;
-      }
-    }
-
-    if (invalidated > 0) {
-      this.logger.debug(`Invalidated ${invalidated} cache entries matching pattern: ${pattern}`);
-    }
-
-    return invalidated;
-  }
 
   private validateConfig(): void {
     const maxTurns = process.env.ACP_MAX_TURNS;
@@ -1412,37 +225,25 @@ export class ClaudeACPAgent implements Agent {
 
   async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
     this.logger.info("Creating new session", { cwd: _params.cwd });
-    
+
     if (!globalResourceManager.canStartOperation('new-session')) {
       handleResourceError('System resources exhausted - cannot create new session', { operation: 'newSession' });
     }
 
     const sessionId = randomUUID();
-    
+
     if (!globalResourceManager.addSession(sessionId)) {
       throw new Error('Maximum concurrent sessions reached');
     }
 
-    const now = Date.now();
-    this.sessions.set(sessionId, {
-      pendingPrompt: null,
-      abortController: null,
+    // Create session using SessionManager
+    const session = this.sessionManager.createSession(sessionId, {
       permissionMode: this.defaultPermissionMode,
-      // Enhanced session features
-      activeFiles: new Set(),
-      thoughtStreaming: ClaudeACPAgent.THOUGHT_STREAM_ENABLED,
-      createdAt: now,
-      lastActivityAt: now,
-      turnCount: 0,
-      operationContext: new Map(),
-      // MCP server support
-      mcpServers: _params.mcpServers,
+      mcpServers: _params.mcpServers
     });
 
-    this.logger.info(`Created session: ${sessionId}`);
-
-    // Save initial session state
-    this.saveSessionState(sessionId);
+    // Store session reference locally for quick access
+    this.sessions.set(sessionId, session);
 
     return { sessionId };
   }
@@ -1456,8 +257,13 @@ export class ClaudeACPAgent implements Agent {
       return null;
     }
 
-    // Try to load session from disk
-    if (this.loadSessionState(params.sessionId)) {
+    // Try to load session using SessionManager
+    const session = this.sessionManager.loadSession(params.sessionId, params.mcpServers);
+
+    if (session) {
+      // Store session reference locally for quick access
+      this.sessions.set(params.sessionId, session);
+
       this.logger.info(`Session ${params.sessionId} loaded from disk`);
 
       // Log MCP server configuration for transparency
@@ -1470,30 +276,21 @@ export class ClaudeACPAgent implements Agent {
 
     // If session doesn't exist anywhere, create a new one
     this.logger.warn(`Session ${params.sessionId} not found - creating new session`);
-    const sessionId = params.sessionId;
 
-    if (!globalResourceManager.addSession(sessionId)) {
+    if (!globalResourceManager.addSession(params.sessionId)) {
       throw new Error('Maximum concurrent sessions reached');
     }
 
-    const now = Date.now();
-    this.sessions.set(sessionId, {
-      pendingPrompt: null,
-      abortController: null,
+    // Create new session using SessionManager
+    const newSession = this.sessionManager.createSession(params.sessionId, {
       permissionMode: this.defaultPermissionMode,
-      // Enhanced session features
-      activeFiles: new Set(),
-      thoughtStreaming: ClaudeACPAgent.THOUGHT_STREAM_ENABLED,
-      createdAt: now,
-      lastActivityAt: now,
-      turnCount: 0,
-      operationContext: new Map(),
-      // MCP server support
-      mcpServers: params.mcpServers,
+      mcpServers: params.mcpServers
     });
 
-    this.logger.info(`Created new session from load request: ${sessionId}`);
-    this.saveSessionState(sessionId);
+    // Store session reference locally for quick access
+    this.sessions.set(params.sessionId, newSession);
+
+    this.logger.info(`Created new session from load request: ${params.sessionId}`);
 
     return null;
   }
@@ -1758,30 +555,30 @@ export class ClaudeACPAgent implements Agent {
     const toolCallId = msg.id || "";
     const session = this.getSession(sessionId);
     
-    // Enhanced tool context analysis
-    const operationContext = this.analyzeToolOperation(toolName, msg.input);
+    // Enhanced tool context analysis using ToolEnhancer
+    const operationContext = this.toolEnhancer.analyzeToolOperation(toolName, msg.input);
     session.operationContext?.set(toolCallId, operationContext);
-    
+
     // Extract file locations for follow-along features
-    const locations = this.extractToolLocations(operationContext);
-    
+    const locations = this.toolEnhancer.extractToolLocations(operationContext);
+
     // Track active files
     if (session.activeFiles && session.activeFiles.size < ClaudeACPAgent.MAX_ACTIVE_FILES_PER_SESSION) {
       locations.forEach(loc => session.activeFiles!.add(loc.path));
     }
-    
+
     // Enhanced tool title with context
-    const enhancedTitle = this.generateEnhancedToolTitle(operationContext);
-    
+    const enhancedTitle = this.toolEnhancer.generateEnhancedToolTitle(operationContext);
+
     // Send agent thought for complex operations
     if (session.thoughtStreaming && operationContext.complexity === "complex") {
       await this.sendAgentThought(sessionId, `Starting ${operationContext.operationType} operation on ${operationContext.affectedFiles?.join(', ') || 'file'}`);
     }
 
     // Initialize real-time streaming for this operation
-    const estimatedDuration = this.estimateOperationDuration(operationContext);
-    const totalSteps = this.estimateOperationSteps(operationContext);
-    const operationId = this.startStreamingOperation(
+    const estimatedDuration = this.streamingManager.estimateOperationDuration(operationContext);
+    const totalSteps = this.streamingManager.estimateOperationSteps(operationContext);
+    const operationId = this.streamingManager.startStreamingOperation(
       sessionId,
       toolCallId,
       toolName,
@@ -1801,7 +598,7 @@ export class ClaudeACPAgent implements Agent {
         sessionUpdate: "tool_call",
         toolCallId,
         title: this.enhanceToolTitle(sessionId, enhancedTitle, "pending", operationContext.operationType),
-        kind: this.mapToolKind(toolName),
+        kind: this.toolEnhancer.mapToolKind(toolName),
         status: "pending",
         rawInput: msg.input as Record<string, unknown>,
         locations,
@@ -1827,19 +624,13 @@ export class ClaudeACPAgent implements Agent {
 
   private async handleToolOutput(sessionId: string, msg: ClaudeMessage): Promise<void> {
     const toolCallId = msg.id || "";
-    const toolName = msg.tool_name || "Tool";
     const session = this.getSession(sessionId);
     const operationContext = session.operationContext?.get(toolCallId);
 
-    // Check if this is a plugin tool
-    const pluginToolMatch = toolName.match(/^plugin\.(.+)\.(.+)$/);
-    if (pluginToolMatch) {
-      await this.handlePluginToolOutput(sessionId, msg, pluginToolMatch[1], pluginToolMatch[2]);
-      return;
-    }
+
     
     // Generate enhanced tool content with diff support
-    const enhancedContent = this.generateEnhancedToolContent(
+    const enhancedContent = this.toolEnhancer.generateEnhancedToolContent(
       operationContext || { toolName: "Tool", input: msg.input },
       msg.output || ""
     );
@@ -1856,7 +647,7 @@ export class ClaudeACPAgent implements Agent {
 
     // Complete streaming operation
     if (operationContext?.streamingOperationId) {
-      this.completeStreamingOperation(operationContext.streamingOperationId, true);
+      this.streamingManager.completeStreamingOperation(operationContext.streamingOperationId, true);
     }
     
     await this.client.sessionUpdate({
@@ -2377,7 +1168,7 @@ export class ClaudeACPAgent implements Agent {
     }
     
     // Enhanced text content with formatting and annotations
-    const formattedOutput = this.formatToolOutput(context, output);
+    const formattedOutput = this.toolEnhancer.formatToolOutput(context, output);
     const annotations = this.generateContentAnnotations(context, output);
     
     return [{
@@ -3530,11 +2321,11 @@ export class ClaudeACPAgent implements Agent {
           sessionId,
           toolCall: {
             toolCallId,
-            title: this.generateEnhancedToolTitle(context),
-            kind: this.mapToolKind(context.toolName),
+            title: this.toolEnhancer.generateEnhancedToolTitle(context),
+            kind: this.toolEnhancer.mapToolKind(context.toolName),
             status: "pending",
             rawInput: this.isValidInput(context.input) ? context.input : undefined,
-            locations: this.extractToolLocations(context)
+            locations: this.toolEnhancer.extractToolLocations(context)
           },
           options: this.generatePermissionOptions(context)
         };

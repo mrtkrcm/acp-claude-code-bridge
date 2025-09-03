@@ -231,7 +231,7 @@ class Connection {
     const errorMessage = error instanceof Error ? error.message : String(error);
     await this.#sendMessage({
       jsonrpc: '2.0',
-      id: null as any,
+      id: "parse-error",
       error: {
         code: -32700,
         message: 'Parse error',
