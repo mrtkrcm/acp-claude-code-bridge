@@ -70,6 +70,7 @@ export interface ToolOperationContext {
   operationType?: "create" | "read" | "edit" | "delete" | "move" | "search" | "execute" | "other";
   affectedFiles?: string[];
   complexity?: "simple" | "moderate" | "complex";
+  streamingOperationId?: string; // For real-time streaming tracking
 }
 
 // Import Zod for runtime validation

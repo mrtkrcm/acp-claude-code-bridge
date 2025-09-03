@@ -364,6 +364,14 @@ export const sessionUpdateSchema = z.union([
     entries: z.array(planEntrySchema),
     sessionUpdate: z.literal('plan'),
   }),
+  z.object({
+    data: z.record(z.string(), z.unknown()),
+    operationId: z.string(),
+    sessionUpdate: z.literal('streaming_update'),
+    timestamp: z.number(),
+    toolCallId: z.string(),
+    type: z.enum(['progress', 'status', 'step', 'completion']),
+  }),
 ]);
 
 export const agentResponseSchema = z.union([

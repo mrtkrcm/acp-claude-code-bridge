@@ -36,6 +36,31 @@ import { globalResourceManager } from './resource-manager.js';
 import { getGlobalErrorHandler, handleResourceError } from './error-handler.js';
 import { getGlobalPerformanceMonitor, withPerformanceTracking } from './performance-monitor.js';
 
+// Real-time streaming interfaces
+interface StreamingOperation {
+  id: string;
+  sessionId: string;
+  toolCallId: string;
+  toolName: string;
+  startTime: number;
+  lastUpdate: number;
+  progress: number;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  estimatedDuration?: number;
+  currentStep?: string;
+  totalSteps?: number;
+  metadata: Record<string, unknown>;
+}
+
+interface StreamingUpdate {
+  type: 'progress' | 'status' | 'step' | 'completion';
+  operationId: string;
+  sessionId: string;
+  toolCallId: string;
+  data: Record<string, unknown>;
+  timestamp: number;
+}
+
 interface AgentSession {
   pendingPrompt: AsyncIterableIterator<SDKMessage> | null;
   abortController: AbortController | null;
@@ -61,7 +86,12 @@ export class ClaudeACPAgent implements Agent {
   private defaultPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   private pathToClaudeCodeExecutable: string | undefined;
   private claudeSDKCircuitBreaker: CircuitBreaker<{ prompt: string; options: Record<string, unknown> }, AsyncIterableIterator<SDKMessage>>;
-  
+
+  // Real-time streaming system
+  private streamingOperations: Map<string, StreamingOperation> = new Map();
+  private streamingClients: Set<Client> = new Set();
+  private streamingTimer: NodeJS.Timeout | null = null;
+
   // Enhanced ACP capabilities
   private readonly enhancedCapabilities: EnhancedPromptCapabilities = {
     audio: false,
@@ -76,6 +106,7 @@ export class ClaudeACPAgent implements Agent {
   private static readonly MAX_ACTIVE_FILES_PER_SESSION = 100;
   private static readonly PLAN_UPDATE_DEBOUNCE = 500; // ms
   private static readonly THOUGHT_STREAM_ENABLED = true;
+  private static readonly STREAMING_UPDATE_INTERVAL = 500; // ms
 
   constructor(private client: Client) {
     // Validate configuration
@@ -125,6 +156,269 @@ export class ClaudeACPAgent implements Agent {
   private getMaxTurnsSource(): string {
     if (process.env.ACP_MAX_TURNS) return '(from ACP_MAX_TURNS)';
     return '(default)';
+  }
+
+  // ========== REAL-TIME STREAMING SYSTEM ==========
+
+  /**
+   * Starts a new streaming operation
+   */
+  private startStreamingOperation(
+    sessionId: string,
+    toolCallId: string,
+    toolName: string,
+    estimatedDuration?: number,
+    totalSteps?: number
+  ): string {
+    const operationId = `op-${sessionId}-${toolCallId}-${Date.now()}`;
+    const operation: StreamingOperation = {
+      id: operationId,
+      sessionId,
+      toolCallId,
+      toolName,
+      startTime: Date.now(),
+      lastUpdate: Date.now(),
+      progress: 0,
+      status: 'pending',
+      estimatedDuration,
+      totalSteps,
+      currentStep: 'initializing',
+      metadata: {}
+    };
+
+    this.streamingOperations.set(operationId, operation);
+    this.logger.debug(`Started streaming operation: ${operationId} (${toolName})`);
+
+    // Start the streaming update timer if not already running
+    if (!this.streamingTimer) {
+      this.startStreamingTimer();
+    }
+
+    return operationId;
+  }
+
+  /**
+   * Updates streaming operation progress
+   */
+  private updateStreamingProgress(
+    operationId: string,
+    progress: number,
+    currentStep?: string,
+    metadata?: Record<string, unknown>
+  ): void {
+    const operation = this.streamingOperations.get(operationId);
+    if (!operation) return;
+
+    operation.progress = Math.max(0, Math.min(100, progress));
+    operation.lastUpdate = Date.now();
+    if (currentStep) operation.currentStep = currentStep;
+    if (metadata) Object.assign(operation.metadata, metadata);
+
+    this.logger.debug(`Updated streaming operation ${operationId}: ${progress}% - ${currentStep || 'processing'}`);
+  }
+
+  /**
+   * Completes a streaming operation
+   */
+  private completeStreamingOperation(operationId: string, success: boolean = true): void {
+    const operation = this.streamingOperations.get(operationId);
+    if (!operation) return;
+
+    operation.status = success ? 'completed' : 'failed';
+    operation.progress = success ? 100 : 0;
+    operation.lastUpdate = Date.now();
+
+    this.logger.debug(`Completed streaming operation: ${operationId} (${success ? 'success' : 'failed'})`);
+
+    // Send final update and cleanup
+    setTimeout(() => {
+      this.streamingOperations.delete(operationId);
+    }, 5000); // Keep for 5 seconds after completion
+  }
+
+  /**
+   * Starts the streaming update timer
+   */
+  private startStreamingTimer(): void {
+    this.streamingTimer = setInterval(() => {
+      this.processStreamingUpdates();
+    }, ClaudeACPAgent.STREAMING_UPDATE_INTERVAL);
+  }
+
+  /**
+   * Processes and sends streaming updates to clients
+   */
+  private async processStreamingUpdates(): Promise<void> {
+    if (this.streamingOperations.size === 0) {
+      if (this.streamingTimer) {
+        clearInterval(this.streamingTimer);
+        this.streamingTimer = null;
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const updates: StreamingUpdate[] = [];
+
+    for (const operation of this.streamingOperations.values()) {
+      // Skip completed operations older than 30 seconds
+      if (operation.status === 'completed' && (now - operation.lastUpdate) > 30000) {
+        continue;
+      }
+
+      // Calculate estimated progress based on time for long-running operations
+      if (operation.status === 'running' && operation.estimatedDuration) {
+        const elapsed = now - operation.startTime;
+        const estimatedProgress = Math.min(90, (elapsed / operation.estimatedDuration) * 100);
+        if (estimatedProgress > operation.progress) {
+          operation.progress = estimatedProgress;
+        }
+      }
+
+      // Create progress update
+      updates.push({
+        type: 'progress',
+        operationId: operation.id,
+        sessionId: operation.sessionId,
+        toolCallId: operation.toolCallId,
+        data: {
+          progress: operation.progress,
+          status: operation.status,
+          currentStep: operation.currentStep,
+          elapsedTime: now - operation.startTime,
+          metadata: operation.metadata
+        },
+        timestamp: now
+      });
+    }
+
+    // Send updates to all streaming clients
+    if (updates.length > 0) {
+      await this.broadcastStreamingUpdates(updates);
+    }
+  }
+
+  /**
+   * Broadcasts streaming updates to all registered clients
+   */
+  private async broadcastStreamingUpdates(updates: StreamingUpdate[]): Promise<void> {
+    for (const client of this.streamingClients) {
+      try {
+        for (const update of updates) {
+          await client.sessionUpdate({
+            sessionId: update.sessionId,
+            update: {
+              sessionUpdate: "streaming_update",
+              operationId: update.operationId,
+              toolCallId: update.toolCallId,
+              type: update.type,
+              data: update.data,
+              timestamp: update.timestamp
+            }
+          });
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to send streaming update to client: ${error}`);
+      }
+    }
+  }
+
+  /**
+   * Registers a client for streaming updates
+   */
+  private registerStreamingClient(client: Client): void {
+    this.streamingClients.add(client);
+    this.logger.debug(`Registered streaming client: ${this.streamingClients.size} total clients`);
+  }
+
+  /**
+   * Unregisters a client from streaming updates
+   */
+  private unregisterStreamingClient(client: Client): void {
+    this.streamingClients.delete(client);
+    this.logger.debug(`Unregistered streaming client: ${this.streamingClients.size} remaining clients`);
+  }
+
+  /**
+   * Estimates operation duration based on tool type and context
+   */
+  private estimateOperationDuration(operationContext: ToolOperationContext): number {
+    const { toolName, complexity, affectedFiles } = operationContext;
+    let baseDuration = 2000; // 2 seconds base
+
+    // Tool-specific duration estimates
+    switch (toolName?.toLowerCase()) {
+      case 'grep':
+      case 'search':
+        baseDuration = 5000; // 5 seconds for search operations
+        break;
+      case 'webfetch':
+        baseDuration = 10000; // 10 seconds for web requests
+        break;
+      case 'multiedit':
+        baseDuration = affectedFiles ? affectedFiles.length * 3000 : 8000;
+        break;
+      case 'bash':
+      case 'run':
+        baseDuration = 15000; // 15 seconds for shell operations
+        break;
+      case 'notebook':
+        baseDuration = 8000; // 8 seconds for notebook operations
+        break;
+      default:
+        baseDuration = complexity === 'complex' ? 5000 : 2000;
+    }
+
+    // Scale by file count for file operations
+    if (affectedFiles && affectedFiles.length > 1) {
+      baseDuration *= Math.min(affectedFiles.length, 5); // Cap at 5x
+    }
+
+    return baseDuration;
+  }
+
+  /**
+   * Estimates operation steps based on tool type and context
+   */
+  private estimateOperationSteps(operationContext: ToolOperationContext): number {
+    const { toolName, complexity, affectedFiles } = operationContext;
+
+    switch (toolName?.toLowerCase()) {
+      case 'multiedit':
+        return affectedFiles ? Math.max(affectedFiles.length, 3) : 3;
+      case 'notebook':
+        return 4; // analyze, read, edit, save
+      case 'grep':
+        return 2; // search, process results
+      case 'webfetch':
+        return 3; // request, download, process
+      case 'bash':
+        return 2; // execute, capture output
+      default:
+        return complexity === 'complex' ? 3 : 1;
+    }
+  }
+
+  /**
+   * Updates streaming progress for long-running operations
+   */
+  private updateOperationProgress(
+    sessionId: string,
+    toolCallId: string,
+    progress: number,
+    currentStep: string,
+    metadata?: Record<string, unknown>
+  ): void {
+    const session = this.getSession(sessionId);
+    const operationContext = session.operationContext?.get(toolCallId);
+    if (operationContext?.streamingOperationId) {
+      this.updateStreamingProgress(
+        operationContext.streamingOperationId,
+        progress,
+        currentStep,
+        metadata
+      );
+    }
   }
 
   private validateConfig(): void {
@@ -547,6 +841,23 @@ export class ClaudeACPAgent implements Agent {
     if (session.thoughtStreaming && operationContext.complexity === "complex") {
       await this.sendAgentThought(sessionId, `Starting ${operationContext.operationType} operation on ${operationContext.affectedFiles?.join(', ') || 'file'}`);
     }
+
+    // Initialize real-time streaming for this operation
+    const estimatedDuration = this.estimateOperationDuration(operationContext);
+    const totalSteps = this.estimateOperationSteps(operationContext);
+    const operationId = this.startStreamingOperation(
+      sessionId,
+      toolCallId,
+      toolName,
+      estimatedDuration,
+      totalSteps
+    );
+
+    // Store operation ID in session for tracking
+    if (session.operationContext) {
+      operationContext.streamingOperationId = operationId;
+      session.operationContext.set(toolCallId, operationContext);
+    }
     
     await this.client.sessionUpdate({
       sessionId,
@@ -597,6 +908,11 @@ export class ClaudeACPAgent implements Agent {
     // Update plan progress if operation was part of a plan
     if (session.currentPlan && operationContext) {
       await this.updatePlanForToolCompletion(sessionId, operationContext);
+    }
+
+    // Complete streaming operation
+    if (operationContext?.streamingOperationId) {
+      this.completeStreamingOperation(operationContext.streamingOperationId, true);
     }
     
     await this.client.sessionUpdate({
