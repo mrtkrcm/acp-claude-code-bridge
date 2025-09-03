@@ -1,6 +1,8 @@
 import { query } from "@anthropic-ai/claude-code";
 import type { SDKMessage } from "@anthropic-ai/claude-code";
 import { randomUUID } from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { Agent, Client } from "./protocol.js";
 import * as schema from "./schema.js";
 import {
@@ -45,6 +47,7 @@ interface AgentSession {
   thoughtStreaming?: boolean;
   createdAt: number;
   lastActivityAt: number;
+  turnCount?: number;
   operationContext?: Map<string, ToolOperationContext>;
   // MCP server support
   mcpServers?: schema.McpServer[];
@@ -93,6 +96,10 @@ export class ClaudeACPAgent implements Agent {
     
     // Enhanced startup logging inspired by Gemini CLI
     this.logStartupConfiguration();
+
+    // Initialize session persistence and cleanup
+    this.cleanupOldSessions();
+
     this.logger.info(`Initialized ACP Agent - Max turns: ${this.maxTurns === 0 ? 'unlimited' : this.maxTurns}, Permission: ${this.defaultPermissionMode}`);
   }
 
@@ -196,30 +203,68 @@ export class ClaudeACPAgent implements Agent {
       thoughtStreaming: ClaudeACPAgent.THOUGHT_STREAM_ENABLED,
       createdAt: now,
       lastActivityAt: now,
+      turnCount: 0,
       operationContext: new Map(),
       // MCP server support
       mcpServers: _params.mcpServers,
     });
 
     this.logger.info(`Created session: ${sessionId}`);
+
+    // Save initial session state
+    this.saveSessionState(sessionId);
+
     return { sessionId };
   }
 
   async loadSession?(params: LoadSessionRequest): Promise<null> {
     this.logger.info(`Loading session: ${params.sessionId}`);
 
-    // ACP doesn't support session persistence - sessions are memory-only
+    // First check if session exists in memory
     if (this.sessions.has(params.sessionId)) {
       this.logger.debug(`Session ${params.sessionId} already exists in memory`);
       return null;
     }
 
-    // Log MCP server configuration for transparency
-    if (params.mcpServers && params.mcpServers.length > 0) {
-      this.logger.info(`MCP servers configured: ${params.mcpServers.map(s => s.name).join(', ')}`);
+    // Try to load session from disk
+    if (this.loadSessionState(params.sessionId)) {
+      this.logger.info(`Session ${params.sessionId} loaded from disk`);
+
+      // Log MCP server configuration for transparency
+      if (params.mcpServers && params.mcpServers.length > 0) {
+        this.logger.info(`MCP servers configured: ${params.mcpServers.map(s => s.name).join(', ')}`);
+      }
+
+      return null;
     }
 
-    this.logger.debug(`Session ${params.sessionId} not found - ACP sessions are memory-only`);
+    // If session doesn't exist anywhere, create a new one
+    this.logger.warn(`Session ${params.sessionId} not found - creating new session`);
+    const sessionId = params.sessionId;
+
+    if (!globalResourceManager.addSession(sessionId)) {
+      throw new Error('Maximum concurrent sessions reached');
+    }
+
+    const now = Date.now();
+    this.sessions.set(sessionId, {
+      pendingPrompt: null,
+      abortController: null,
+      permissionMode: this.defaultPermissionMode,
+      // Enhanced session features
+      activeFiles: new Set(),
+      thoughtStreaming: ClaudeACPAgent.THOUGHT_STREAM_ENABLED,
+      createdAt: now,
+      lastActivityAt: now,
+      turnCount: 0,
+      operationContext: new Map(),
+      // MCP server support
+      mcpServers: params.mcpServers,
+    });
+
+    this.logger.info(`Created new session from load request: ${sessionId}`);
+    this.saveSessionState(sessionId);
+
     return null;
   }
 
@@ -335,11 +380,12 @@ export class ClaudeACPAgent implements Agent {
       // Process messages
       for await (const message of messages) {
         if (session.abortController?.signal.aborted) {
+          this.saveSessionState(sessionId);
           return { stopReason: "cancelled" };
         }
 
         const sdkMessage = message as SDKMessage;
-        
+
         // Extract Claude session ID
         if ("session_id" in sdkMessage && typeof sdkMessage.session_id === "string") {
           session.claudeSessionId = sdkMessage.session_id;
@@ -349,14 +395,17 @@ export class ClaudeACPAgent implements Agent {
       }
 
       session.pendingPrompt = null;
+      this.saveSessionState(sessionId);
       return { stopReason: "end_turn" };
       
     } catch (error) {
       if (session.abortController?.signal.aborted) {
+        this.saveSessionState(sessionId);
         return { stopReason: "cancelled" };
       }
 
       await this.sendErrorMessage(sessionId, error);
+      this.saveSessionState(sessionId);
       return { stopReason: "end_turn" };
     } finally {
       if (operationId) {
@@ -364,6 +413,8 @@ export class ClaudeACPAgent implements Agent {
       }
       session.pendingPrompt = null;
       session.abortController = null;
+      // Final session state save
+      this.saveSessionState(sessionId);
     }
   }
 
@@ -1659,6 +1710,135 @@ export class ClaudeACPAgent implements Agent {
       }
       return prefix + line;
     }).join('\n');
+  }
+
+  /**
+   * Session persistence management
+   */
+  private saveSessionState(sessionId: string): void {
+    try {
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        this.logger.warn(`Cannot save session state: session ${sessionId} not found`);
+        return;
+      }
+
+      const sessionData = {
+        sessionId,
+        createdAt: session.createdAt,
+        lastActivity: new Date(),
+        turnCount: session.turnCount,
+        permissionMode: session.permissionMode,
+        contextTokens: this.getCurrentContextTokens(sessionId),
+        metadata: {
+          userAgent: 'acp-claude-code-bridge',
+          version: '0.21.0',
+          savedAt: new Date().toISOString()
+        }
+      };
+
+      // Create sessions directory if it doesn't exist
+      const sessionsDir = path.join(process.cwd(), '.acp-sessions');
+      if (!fs.existsSync(sessionsDir)) {
+        fs.mkdirSync(sessionsDir, { recursive: true });
+      }
+
+      const sessionFile = path.join(sessionsDir, `${sessionId}.json`);
+      fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
+
+      this.logger.info(`Session state saved: ${sessionId}`);
+    } catch (error) {
+      this.logger.error(`Failed to save session state for ${sessionId}:`, error);
+    }
+  }
+
+  /**
+   * Load session state from disk
+   */
+  private loadSessionState(sessionId: string): boolean {
+    try {
+      const sessionsDir = path.join(process.cwd(), '.acp-sessions');
+      const sessionFile = path.join(sessionsDir, `${sessionId}.json`);
+
+      if (!fs.existsSync(sessionFile)) {
+        return false; // No saved session found
+      }
+
+      const sessionData = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+
+      // Validate session data structure
+      if (!sessionData.sessionId || !sessionData.createdAt) {
+        this.logger.warn(`Invalid session data structure for ${sessionId}`);
+        return false;
+      }
+
+      // Create session from saved data
+      const session: AgentSession = {
+        pendingPrompt: null,
+        abortController: null,
+        permissionMode: sessionData.permissionMode || 'default',
+        activeFiles: new Set(),
+        thoughtStreaming: ClaudeACPAgent.THOUGHT_STREAM_ENABLED,
+        createdAt: new Date(sessionData.createdAt).getTime(),
+        lastActivityAt: Date.now(),
+        turnCount: sessionData.turnCount || 0,
+        operationContext: new Map(),
+        mcpServers: sessionData.mcpServers,
+      };
+
+      this.sessions.set(sessionId, session);
+      this.logger.info(`Session state loaded: ${sessionId} (${sessionData.contextTokens || 0} tokens)`);
+      return true;
+    } catch (error) {
+      this.logger.error(`Failed to load session state for ${sessionId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get current context token count for a session
+   */
+  private getCurrentContextTokens(sessionId: string): number {
+    // This is a simplified implementation - in practice you'd track actual token usage
+    const session = this.sessions.get(sessionId);
+    if (!session) return 0;
+
+    // Estimate based on session activity
+    const turnCount = session.turnCount || 0;
+    return Math.min(turnCount * 1000, 200000); // Conservative estimate
+  }
+
+  /**
+   * Clean up old session files
+   */
+  private cleanupOldSessions(): void {
+    try {
+      const sessionsDir = path.join(process.cwd(), '.acp-sessions');
+      if (!fs.existsSync(sessionsDir)) return;
+
+      const files = fs.readdirSync(sessionsDir);
+      const now = Date.now();
+      const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+      let cleanedCount = 0;
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+
+        const filePath = path.join(sessionsDir, file);
+        const stats = fs.statSync(filePath);
+
+        if (now - stats.mtime.getTime() > maxAge) {
+          fs.unlinkSync(filePath);
+          cleanedCount++;
+        }
+      }
+
+      if (cleanedCount > 0) {
+        this.logger.info(`Cleaned up ${cleanedCount} old session files`);
+      }
+    } catch (error) {
+      this.logger.error('Failed to cleanup old sessions:', error);
+    }
   }
 
   /**
