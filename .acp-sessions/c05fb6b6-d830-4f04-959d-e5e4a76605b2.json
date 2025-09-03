@@ -1,0 +1,13 @@
+{
+  "sessionId": "c05fb6b6-d830-4f04-959d-e5e4a76605b2",
+  "createdAt": 1756868259932,
+  "lastActivity": "2025-09-03T02:57:39.932Z",
+  "turnCount": 0,
+  "permissionMode": "default",
+  "contextTokens": 0,
+  "metadata": {
+    "userAgent": "acp-claude-code-bridge",
+    "version": "0.21.0",
+    "savedAt": "2025-09-03T02:57:39.932Z"
+  }
+}
