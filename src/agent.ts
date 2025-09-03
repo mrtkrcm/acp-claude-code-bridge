@@ -1194,12 +1194,32 @@ export class ClaudeACPAgent implements Agent {
           return `[AGENT] ${description || 'Task delegation'} (${subagentType || 'specialized'})\n${output}`;
         }
 
-        // Handle Background Shell Output tool
+        // Handle Background Shell Output tool with enhanced formatting
         if (context.toolName === 'BashOutput') {
           const bashId = this.extractBashId(context.input);
           const filter = this.extractOutputFilter(context.input);
-          const filtered = filter ? ` (filtered: ${filter})` : '';
-          return `[BASH-OUT] Background process ${bashId || 'unknown'}${filtered}\n${output}`;
+          const status = this.extractProcessStatus(context.input);
+          const duration = this.extractProcessDuration(context.input);
+          const exitCode = this.extractExitCode(context.input);
+
+          let statusInfo = '';
+          if (status) {
+            statusInfo += ` (${status})`;
+          }
+          if (duration) {
+            statusInfo += ` [${duration}]`;
+          }
+          if (exitCode !== null && exitCode !== undefined) {
+            statusInfo += ` exit:${exitCode}`;
+          }
+          if (filter) {
+            statusInfo += ` filter:${filter}`;
+          }
+
+          const outputLines = output.split('\n').length;
+          const outputChars = output.length;
+
+          return `[BASH-OUT] Process ${bashId || 'unknown'}${statusInfo} (${outputLines} lines, ${outputChars} chars)\n${this.formatBackgroundOutput(output, status)}`;
         }
 
         // Handle Exit Plan Mode tool
@@ -1217,10 +1237,21 @@ export class ClaudeACPAgent implements Agent {
           return `[GLOB] Pattern: "${pattern || '*'}"${pathInfo} (${resultCount} matches)\n${output}`;
         }
 
-        // Handle Kill Shell tool
+        // Handle Kill Shell tool with enhanced termination details
         if (context.toolName === 'KillShell') {
           const shellId = this.extractShellId(context.input);
-          return `[KILL-SHELL] Terminated background process ${shellId || 'unknown'}\n${output}`;
+          const signal = this.extractTerminationSignal(context.input);
+          const force = this.extractForceTermination(context.input);
+
+          let terminationDetails = '';
+          if (signal) {
+            terminationDetails += ` with ${signal}`;
+          }
+          if (force) {
+            terminationDetails += ' (forced)';
+          }
+
+          return `[KILL-SHELL] Terminated background process ${shellId || 'unknown'}${terminationDetails}\n${this.formatTerminationOutput(output, signal)}`;
         }
 
         // Handle Notebook Edit tool
@@ -1411,6 +1442,89 @@ export class ClaudeACPAgent implements Agent {
   }
 
   /**
+   * Extracts process status from BashOutput tool input
+   */
+  private extractProcessStatus(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.status) {
+      return String(inputObj.status);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts process duration from BashOutput tool input
+   */
+  private extractProcessDuration(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.duration) {
+      return String(inputObj.duration);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts exit code from BashOutput tool input
+   */
+  private extractExitCode(input: unknown): number | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.exit_code !== undefined && inputObj.exit_code !== null) {
+      const exitCode = Number(inputObj.exit_code);
+      return isNaN(exitCode) ? null : exitCode;
+    }
+
+    return null;
+  }
+
+  /**
+   * Formats background shell output with appropriate indicators
+   */
+  private formatBackgroundOutput(output: string, status?: string | null): string {
+    if (!output.trim()) {
+      return '  (no output)';
+    }
+
+    // Add status indicators based on process state
+    let prefix = '';
+    if (status) {
+      switch (status.toLowerCase()) {
+        case 'running':
+          prefix = '  [RUN] ';
+          break;
+        case 'completed':
+          prefix = '  [DONE] ';
+          break;
+        case 'failed':
+          prefix = '  [FAIL] ';
+          break;
+        case 'terminated':
+          prefix = '  [TERM] ';
+          break;
+        default:
+          prefix = '  [INFO] ';
+      }
+    } else {
+      prefix = '  [INFO] ';
+    }
+
+    // Format each line with the appropriate prefix
+    return output.split('\n').map(line => {
+      if (line.trim().length === 0) {
+        return line; // Keep empty lines as-is
+      }
+      return prefix + line;
+    }).join('\n');
+  }
+
+  /**
    * Extracts plan summary from ExitPlanMode tool input
    */
   private extractPlanSummary(input: unknown): string | null {
@@ -1477,6 +1591,74 @@ export class ClaudeACPAgent implements Agent {
     }
 
     return null;
+  }
+
+  /**
+   * Extracts termination signal from KillShell tool input
+   */
+  private extractTerminationSignal(input: unknown): string | null {
+    if (!this.isValidInput(input)) return null;
+
+    const inputObj = input;
+    if (inputObj.signal) {
+      return String(inputObj.signal);
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts force termination flag from KillShell tool input
+   */
+  private extractForceTermination(input: unknown): boolean {
+    if (!this.isValidInput(input)) return false;
+
+    const inputObj = input;
+    if (inputObj.force !== undefined && inputObj.force !== null) {
+      return Boolean(inputObj.force);
+    }
+
+    return false;
+  }
+
+  /**
+   * Formats termination output with appropriate indicators
+   */
+  private formatTerminationOutput(output: string, signal?: string | null): string {
+    if (!output.trim()) {
+      return '  (no termination output)';
+    }
+
+    // Add signal-specific formatting
+    let prefix = '';
+    if (signal) {
+      switch (signal.toUpperCase()) {
+        case 'SIGTERM':
+          prefix = '  [TERM] ';
+          break;
+        case 'SIGKILL':
+          prefix = '  [KILL] ';
+          break;
+        case 'SIGINT':
+          prefix = '  [INT] ';
+          break;
+        case 'SIGHUP':
+          prefix = '  [HUP] ';
+          break;
+        default:
+          prefix = '  [STOP] ';
+      }
+    } else {
+      prefix = '  [STOP] ';
+    }
+
+    // Format each line with the appropriate prefix
+    return output.split('\n').map(line => {
+      if (line.trim().length === 0) {
+        return line; // Keep empty lines as-is
+      }
+      return prefix + line;
+    }).join('\n');
   }
 
   /**
